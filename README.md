@@ -90,6 +90,94 @@ func handleClientPackets(stack *slirp.Stack, packetSource <-chan []byte) {
 }
 ```
 
+### Virtual Listeners
+
+The library supports virtual TCP listeners that allow services to run entirely within the slirp stack, enabling fully user-land testing by connecting multiple slirp stacks together.
+
+```go
+package main
+
+import (
+    "fmt"
+    "io"
+    "log"
+    "github.com/KarpelesLab/slirp"
+)
+
+func main() {
+    stack := slirp.New()
+
+    // Create a virtual listener on a virtual IP address
+    listener, err := stack.Listen("tcp", "10.0.0.1:8080")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer listener.Close()
+
+    // Accept connections in a goroutine
+    go func() {
+        for {
+            conn, err := listener.Accept()
+            if err != nil {
+                return
+            }
+
+            // Handle connection (echo server example)
+            go func(c net.Conn) {
+                defer c.Close()
+                io.Copy(c, c) // Echo back
+            }(conn)
+        }
+    }()
+
+    // Process incoming packets that connect to 10.0.0.1:8080
+    // The stack will route them to the virtual listener
+    clientMAC := [6]byte{0x52, 0x54, 0x00, 0x12, 0x34, 0x56}
+    gwMAC := [6]byte{0x52, 0x54, 0x00, 0x12, 0x34, 0x57}
+
+    writer := func(frame []byte) error {
+        // Send frame back to client
+        return sendToClient(frame)
+    }
+
+    // When client sends SYN to 10.0.0.1:8080, it will trigger Accept()
+    for packet := range packetSource {
+        err := stack.HandleOutboundIPv4(0, clientMAC, gwMAC, packet, writer)
+        if err != nil {
+            log.Printf("Error: %v", err)
+        }
+    }
+}
+```
+
+#### Testing with Two Slirp Stacks
+
+Virtual listeners enable fully user-land integration testing:
+
+```go
+func TestTwoStackCommunication(t *testing.T) {
+    stack1 := slirp.New()
+    stack2 := slirp.New()
+
+    // Stack2 listens on virtual address
+    listener, _ := stack2.Listen("tcp", "10.0.0.2:9000")
+
+    // Server on stack2
+    go func() {
+        conn, _ := listener.Accept()
+        defer conn.Close()
+
+        buf := make([]byte, 1024)
+        n, _ := conn.Read(buf)
+        conn.Write(buf[:n]) // Echo
+    }()
+
+    // Client on stack1 sends packets to stack2's virtual address
+    // Packets from stack1 are forwarded to stack2 via the writer callbacks
+    // This enables testing without real network interfaces
+}
+```
+
 ## API Reference
 
 ### Types
@@ -135,6 +223,58 @@ Processes an outbound IPv4 packet from a client.
 **Supported Protocols:**
 - TCP (protocol 6)
 - UDP (protocol 17)
+- Virtual TCP listeners (packets destined for registered virtual addresses)
+
+#### `Listen`
+
+```go
+func (s *Stack) Listen(network, address string) (*Listener, error)
+```
+
+Creates a virtual TCP listener on a virtual network address within the slirp stack.
+
+**Parameters:**
+- `network`: Must be "tcp" or "tcp4"
+- `address`: Virtual IP:port to listen on (e.g., "10.0.0.1:8080")
+
+**Returns:**
+- `*Listener`: A listener that implements the `net.Listener` interface
+- `error`: Error if the address is invalid or already in use
+
+**Example:**
+```go
+listener, err := stack.Listen("tcp", "192.168.100.1:9000")
+if err != nil {
+    log.Fatal(err)
+}
+defer listener.Close()
+
+conn, err := listener.Accept()
+// Handle connection...
+```
+
+#### `Listener`
+
+Virtual listener type that implements `net.Listener`:
+
+**Methods:**
+- `Accept() (net.Conn, error)`: Waits for and returns the next connection
+- `Close() error`: Closes the listener
+- `Addr() net.Addr`: Returns the listener's network address
+
+#### `VirtualConn`
+
+Virtual connection type that implements `net.Conn`. Returned by `Listener.Accept()`.
+
+**Methods:**
+- `Read(b []byte) (int, error)`: Reads data from the connection
+- `Write(b []byte) (int, error)`: Writes data to the connection
+- `Close() error`: Closes the connection
+- `LocalAddr() net.Addr`: Returns the local network address
+- `RemoteAddr() net.Addr`: Returns the remote network address
+- `SetDeadline(t time.Time) error`: Not implemented
+- `SetReadDeadline(t time.Time) error`: Not implemented
+- `SetWriteDeadline(t time.Time) error`: Not implemented
 
 ## Implementation Details
 

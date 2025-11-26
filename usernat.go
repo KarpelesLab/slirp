@@ -20,15 +20,19 @@ type key struct {
 }
 
 type Stack struct {
-	mu  sync.RWMutex
-	tcp map[key]*tcpConn
-	udp map[key]*udpConn
+	mu        sync.RWMutex
+	tcp       map[key]*tcpConn
+	udp       map[key]*udpConn
+	listeners map[listenerKey]*Listener
+	virtTCP   map[key]*VirtualConn
 }
 
 func New() *Stack {
 	s := &Stack{
-		tcp: make(map[key]*tcpConn),
-		udp: make(map[key]*udpConn),
+		tcp:       make(map[key]*tcpConn),
+		udp:       make(map[key]*udpConn),
+		listeners: make(map[listenerKey]*Listener),
+		virtTCP:   make(map[key]*VirtualConn),
 	}
 	go s.maintenance()
 	return s
@@ -57,8 +61,46 @@ func (s *Stack) HandleOutboundIPv4(ns uintptr, clientMAC [6]byte, gwMAC [6]byte,
 		tcp := ip[ihl:]
 		srcPort := binary.BigEndian.Uint16(tcp[0:2])
 		dstPort := binary.BigEndian.Uint16(tcp[2:4])
-		k := key{ns: ns, srcIP: srcIP, srcPort: srcPort, dstIP: dstIP, dstPort: dstPort}
+		flags := tcp[13]
+
+		// Check if this is destined for a virtual listener
+		lk := listenerKey{ip: dstIP, port: dstPort}
 		s.mu.Lock()
+		listener := s.listeners[lk]
+		if listener != nil && (flags&0x02) != 0 { // SYN to virtual listener
+			// Create virtual connection
+			k := key{ns: ns, srcIP: srcIP, srcPort: srcPort, dstIP: dstIP, dstPort: dstPort}
+			vc := s.virtTCP[k]
+			if vc == nil {
+				vc = newVirtualConn(dstIP, dstPort, srcIP, srcPort, clientMAC, gwMAC, w)
+				vc.clientSeq = binary.BigEndian.Uint32(tcp[4:8]) + 1
+				vc.ack = vc.clientSeq
+				s.virtTCP[k] = vc
+
+				// Send SYN-ACK
+				pkt := buildTCPPacket(gwMAC, clientMAC, dstIP, srcIP, dstPort, srcPort, vc.seq, vc.ack, 0x12, nil)
+				s.mu.Unlock()
+				_ = w(pkt)
+
+				// Queue connection for Accept()
+				select {
+				case listener.acceptCh <- vc:
+				default:
+					// Accept queue full, drop connection
+				}
+				return nil
+			}
+		}
+
+		// Check if this is for an existing virtual connection
+		k := key{ns: ns, srcIP: srcIP, srcPort: srcPort, dstIP: dstIP, dstPort: dstPort}
+		vc := s.virtTCP[k]
+		if vc != nil {
+			s.mu.Unlock()
+			return vc.handleInbound(ip)
+		}
+
+		// Otherwise, create outbound connection
 		c := s.tcp[k]
 		if c == nil {
 			c = newTCPConn(srcIP, srcPort, dstIP, dstPort, clientMAC, gwMAC, w)
@@ -123,6 +165,17 @@ func (s *Stack) maintenance() {
 				delete(s.udp, k)
 			}
 			u.mu.Unlock()
+		}
+		// Virtual TCP cleanup
+		for k, vc := range s.virtTCP {
+			vc.mu.Lock()
+			idle := now.Sub(vc.lastAct)
+			closed := vc.closed
+			if idle > 2*time.Minute || closed {
+				_ = vc.Close()
+				delete(s.virtTCP, k)
+			}
+			vc.mu.Unlock()
 		}
 		s.mu.Unlock()
 	}

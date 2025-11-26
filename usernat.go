@@ -38,18 +38,36 @@ func New() *Stack {
 	return s
 }
 
-// HandleIPv4 processes an IPv4 packet (starting at IP header).
+// HandlePacket processes an IP packet (starting at IP header).
 // This handles traffic in both directions - there is no separate "inbound" handler.
+// Currently supports IPv4; IPv6 support can be added in the future.
 //
 // Parameters:
 //   - namespace: Identifier for connection isolation (use 0 for single namespace)
 //   - clientMAC: MAC address of the endpoint that sent this packet (used as destination in responses)
 //   - gwMAC: MAC address for this slirp instance (used as source in responses)
-//   - ip: Raw IPv4 packet data (must start at IP header, not Ethernet header)
+//   - packet: Raw IP packet data (must start at IP header, not Ethernet header)
 //   - w: Writer callback for sending Ethernet frames back to the endpoint
-func (s *Stack) HandleIPv4(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, ip []byte, w Writer) error {
-	if len(ip) < 20 || (ip[0]>>4) != 4 {
-		return errors.New("not ipv4 or too short")
+func (s *Stack) HandlePacket(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, packet []byte, w Writer) error {
+	if len(packet) < 20 {
+		return errors.New("packet too short")
+	}
+
+	// Check IP version
+	version := packet[0] >> 4
+	switch version {
+	case 4:
+		return s.handleIPv4(namespace, clientMAC, gwMAC, packet, w)
+	case 6:
+		return errors.New("IPv6 not yet supported")
+	default:
+		return errors.New("unsupported IP version")
+	}
+}
+
+func (s *Stack) handleIPv4(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, ip []byte, w Writer) error {
+	if len(ip) < 20 {
+		return errors.New("IPv4 packet too short")
 	}
 	ihl := int(ip[0]&0x0F) * 4
 	if len(ip) < ihl {

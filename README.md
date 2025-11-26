@@ -58,7 +58,7 @@ func main() {
     var gwMAC [6]byte = [6]byte{0x52, 0x54, 0x00, 0x12, 0x34, 0x57}
 
     // Handle each packet
-    err := stack.HandleIPv4(0, clientMAC, gwMAC, ipPacket, writer)
+    err := stack.HandlePacket(0, clientMAC, gwMAC, ipPacket, writer)
     if err != nil {
         // Handle error
     }
@@ -82,7 +82,7 @@ func handleClientPackets(stack *slirp.Stack, packetSource <-chan []byte) {
         // Extract IP packet from Ethernet frame if needed
         ipPacket := extractIPPacket(packet)
 
-        err := stack.HandleIPv4(0, clientMAC, gwMAC, ipPacket, writer)
+        err := stack.HandlePacket(0, clientMAC, gwMAC, ipPacket, writer)
         if err != nil {
             log.Printf("Error handling packet: %v", err)
         }
@@ -142,7 +142,7 @@ func main() {
 
     // When client sends SYN to 10.0.0.1:8080, it will trigger Accept()
     for packet := range packetSource {
-        err := stack.HandleIPv4(0, clientMAC, gwMAC, packet, writer)
+        err := stack.HandlePacket(0, clientMAC, gwMAC, packet, writer)
         if err != nil {
             log.Printf("Error: %v", err)
         }
@@ -202,25 +202,31 @@ type Writer func([]byte) error
 
 ### Methods
 
-#### `HandleIPv4`
+#### `HandlePacket`
 
 ```go
-func (s *Stack) HandleIPv4(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, ip []byte, w Writer) error
+func (s *Stack) HandlePacket(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, packet []byte, w Writer) error
 ```
 
-Processes an IPv4 packet. This handles traffic in **both directions** - there is no separate "inbound" handler. Slirp processes packets bidirectionally based on routing and connection state.
+Processes an IP packet. This handles traffic in **both directions** - there is no separate "inbound" handler. Slirp processes packets bidirectionally based on routing and connection state.
+
+The function automatically detects the IP version (IPv4/IPv6) from the packet header.
 
 **Parameters:**
 - `namespace`: Identifier for connection isolation (use 0 for single namespace)
 - `clientMAC`: MAC address of the endpoint that sent this packet (used as destination in responses)
 - `gwMAC`: MAC address for this slirp instance (used as source in responses)
-- `ip`: Raw IPv4 packet data (must start at IP header, not Ethernet header)
+- `packet`: Raw IP packet data (must start at IP header, not Ethernet header)
 - `w`: Writer callback for sending Ethernet frames back to the endpoint
 
 **Returns:**
-- `error`: Error if packet is malformed or processing fails
+- `error`: Error if packet is malformed, unsupported IP version, or processing fails
 
-**Supported Protocols:**
+**Supported IP Versions:**
+- IPv4 (version 4) - fully supported
+- IPv6 (version 6) - not yet implemented
+
+**Supported Protocols (IPv4):**
 - TCP (protocol 6) - creates real connections or routes to virtual listeners
 - UDP (protocol 17) - creates real sockets or routes to virtual listeners (when implemented)
 - Virtual TCP listeners (packets destined for registered virtual addresses)

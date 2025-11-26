@@ -38,9 +38,16 @@ func New() *Stack {
 	return s
 }
 
-// HandleOutboundIPv4 handles an outbound IPv4 packet (starting at IP header) from a client.
-// clientMAC is the destination MAC for responses; gwMAC is the source MAC used in responses.
-func (s *Stack) HandleOutboundIPv4(ns uintptr, clientMAC [6]byte, gwMAC [6]byte, ip []byte, w Writer) error {
+// HandleIPv4 processes an IPv4 packet (starting at IP header).
+// This handles traffic in both directions - there is no separate "inbound" handler.
+//
+// Parameters:
+//   - namespace: Identifier for connection isolation (use 0 for single namespace)
+//   - clientMAC: MAC address of the endpoint that sent this packet (used as destination in responses)
+//   - gwMAC: MAC address for this slirp instance (used as source in responses)
+//   - ip: Raw IPv4 packet data (must start at IP header, not Ethernet header)
+//   - w: Writer callback for sending Ethernet frames back to the endpoint
+func (s *Stack) HandleIPv4(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, ip []byte, w Writer) error {
 	if len(ip) < 20 || (ip[0]>>4) != 4 {
 		return errors.New("not ipv4 or too short")
 	}
@@ -69,7 +76,7 @@ func (s *Stack) HandleOutboundIPv4(ns uintptr, clientMAC [6]byte, gwMAC [6]byte,
 		listener := s.listeners[lk]
 		if listener != nil && (flags&0x02) != 0 { // SYN to virtual listener
 			// Create virtual connection
-			k := key{ns: ns, srcIP: srcIP, srcPort: srcPort, dstIP: dstIP, dstPort: dstPort}
+			k := key{ns: namespace, srcIP: srcIP, srcPort: srcPort, dstIP: dstIP, dstPort: dstPort}
 			vc := s.virtTCP[k]
 			if vc == nil {
 				vc = newVirtualConn(dstIP, dstPort, srcIP, srcPort, clientMAC, gwMAC, w)
@@ -93,7 +100,7 @@ func (s *Stack) HandleOutboundIPv4(ns uintptr, clientMAC [6]byte, gwMAC [6]byte,
 		}
 
 		// Check if this is for an existing virtual connection
-		k := key{ns: ns, srcIP: srcIP, srcPort: srcPort, dstIP: dstIP, dstPort: dstPort}
+		k := key{ns: namespace, srcIP: srcIP, srcPort: srcPort, dstIP: dstIP, dstPort: dstPort}
 		vc := s.virtTCP[k]
 		if vc != nil {
 			s.mu.Unlock()
@@ -115,7 +122,7 @@ func (s *Stack) HandleOutboundIPv4(ns uintptr, clientMAC [6]byte, gwMAC [6]byte,
 		udp := ip[ihl:]
 		srcPort := binary.BigEndian.Uint16(udp[0:2])
 		dstPort := binary.BigEndian.Uint16(udp[2:4])
-		k := key{ns: ns, srcIP: srcIP, srcPort: srcPort, dstIP: dstIP, dstPort: dstPort}
+		k := key{ns: namespace, srcIP: srcIP, srcPort: srcPort, dstIP: dstIP, dstPort: dstPort}
 		s.mu.Lock()
 		u := s.udp[k]
 		if u == nil {

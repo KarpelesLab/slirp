@@ -132,9 +132,9 @@ func TestVirtualConnection(t *testing.T) {
 	dstPort := uint16(9000)
 
 	synPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 1000, 0, 0x02, nil)
-	err = s.HandleOutboundIPv4(0, clientMAC, gwMAC, synPkt, writer)
+	err = s.HandleIPv4(0, clientMAC, gwMAC, synPkt, writer)
 	if err != nil {
-		t.Fatalf("HandleOutboundIPv4 SYN failed: %v", err)
+		t.Fatalf("HandleIPv4 SYN failed: %v", err)
 	}
 
 	// Wait for SYN-ACK
@@ -163,9 +163,9 @@ func TestVirtualConnection(t *testing.T) {
 
 	// Send ACK to complete handshake
 	ackPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 1001, serverSeq+1, 0x10, nil)
-	err = s.HandleOutboundIPv4(0, clientMAC, gwMAC, ackPkt, writer)
+	err = s.HandleIPv4(0, clientMAC, gwMAC, ackPkt, writer)
 	if err != nil {
-		t.Fatalf("HandleOutboundIPv4 ACK failed: %v", err)
+		t.Fatalf("HandleIPv4 ACK failed: %v", err)
 	}
 
 	time.Sleep(50 * time.Millisecond)
@@ -173,9 +173,9 @@ func TestVirtualConnection(t *testing.T) {
 	// Send data
 	payload := []byte("Hello, virtual server!")
 	dataPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 1001, serverSeq+1, 0x18, payload)
-	err = s.HandleOutboundIPv4(0, clientMAC, gwMAC, dataPkt, writer)
+	err = s.HandleIPv4(0, clientMAC, gwMAC, dataPkt, writer)
 	if err != nil {
-		t.Fatalf("HandleOutboundIPv4 data failed: %v", err)
+		t.Fatalf("HandleIPv4 data failed: %v", err)
 	}
 
 	// Wait for server to process and echo
@@ -257,7 +257,7 @@ func TestTwoSlirpConnection(t *testing.T) {
 
 	// Send SYN
 	synPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 5000, 0, 0x02, nil)
-	err = stack.HandleOutboundIPv4(0, clientMAC, gwMAC, synPkt, writer)
+	err = stack.HandleIPv4(0, clientMAC, gwMAC, synPkt, writer)
 	if err != nil {
 		t.Fatalf("Client SYN failed: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestTwoSlirpConnection(t *testing.T) {
 
 	// Send ACK to complete handshake
 	ackPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 5001, serverSeq+1, 0x10, nil)
-	err = stack.HandleOutboundIPv4(0, clientMAC, gwMAC, ackPkt, writer)
+	err = stack.HandleIPv4(0, clientMAC, gwMAC, ackPkt, writer)
 	if err != nil {
 		t.Fatalf("Client ACK failed: %v", err)
 	}
@@ -292,7 +292,7 @@ func TestTwoSlirpConnection(t *testing.T) {
 	// Send data
 	testData := []byte("Hello virtual server!")
 	dataPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 5001, serverSeq+1, 0x18, testData)
-	err = stack.HandleOutboundIPv4(0, clientMAC, gwMAC, dataPkt, writer)
+	err = stack.HandleIPv4(0, clientMAC, gwMAC, dataPkt, writer)
 	if err != nil {
 		t.Fatalf("Client data send failed: %v", err)
 	}

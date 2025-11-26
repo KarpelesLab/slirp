@@ -264,7 +264,7 @@ func TestUDPPacketStructure(t *testing.T) {
 	}
 }
 
-func TestHandleOutboundIPv4_UDP(t *testing.T) {
+func TestHandleIPv4_UDP(t *testing.T) {
 	s := New()
 
 	// Create UDP echo server
@@ -314,9 +314,9 @@ func TestHandleOutboundIPv4_UDP(t *testing.T) {
 	payload := []byte("Hello from test!")
 	udpPacket := createUDPPacket(srcIP, dstIP, 54321, uint16(actualServerAddr.Port), payload)
 
-	err = s.HandleOutboundIPv4(0, clientMAC, gwMAC, udpPacket, writer)
+	err = s.HandleIPv4(0, clientMAC, gwMAC, udpPacket, writer)
 	if err != nil {
-		t.Fatalf("HandleOutboundIPv4 failed: %v", err)
+		t.Fatalf("HandleIPv4 failed: %v", err)
 	}
 
 	// Wait for echo response

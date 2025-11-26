@@ -102,7 +102,7 @@ func TestRandUint32(t *testing.T) {
 	}
 }
 
-func TestHandleOutboundIPv4_InvalidPackets(t *testing.T) {
+func TestHandleIPv4_InvalidPackets(t *testing.T) {
 	s := New()
 	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
 	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
@@ -138,7 +138,7 @@ func TestHandleOutboundIPv4_InvalidPackets(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := s.HandleOutboundIPv4(0, clientMAC, gwMAC, tt.packet, writer)
+			err := s.HandleIPv4(0, clientMAC, gwMAC, tt.packet, writer)
 			if err == nil {
 				t.Error("expected error, got nil")
 			} else if err.Error() != tt.errMsg {
@@ -148,7 +148,7 @@ func TestHandleOutboundIPv4_InvalidPackets(t *testing.T) {
 	}
 }
 
-func TestHandleOutboundIPv4_UnknownProtocol(t *testing.T) {
+func TestHandleIPv4_UnknownProtocol(t *testing.T) {
 	s := New()
 	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
 	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
@@ -162,7 +162,7 @@ func TestHandleOutboundIPv4_UnknownProtocol(t *testing.T) {
 	copy(packet[12:16], []byte{192, 168, 1, 1}) // Source IP
 	copy(packet[16:20], []byte{8, 8, 8, 8})     // Dest IP
 
-	err := s.HandleOutboundIPv4(0, clientMAC, gwMAC, packet, writer)
+	err := s.HandleIPv4(0, clientMAC, gwMAC, packet, writer)
 	if err != nil {
 		t.Errorf("unexpected error for unsupported protocol: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestConcurrentAccess(t *testing.T) {
 			packet[32] = 0x50 // Data offset
 			packet[33] = 0x02 // SYN flag
 
-			_ = s.HandleOutboundIPv4(0, clientMAC, gwMAC, packet, writer)
+			_ = s.HandleIPv4(0, clientMAC, gwMAC, packet, writer)
 		}(uint16(10000 + i))
 	}
 	wg.Wait()

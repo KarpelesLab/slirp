@@ -13,8 +13,14 @@ This library implements a lightweight, user-space networking stack that intercep
 
 ## Features
 
-- **TCP Connection Handling**: Full TCP state machine with flow control, windowing, and retransmission
-- **UDP Support**: Stateless UDP packet forwarding with connection tracking
+- **TCP Connection Handling**: Full TCP state machine with flow control, windowing, and retransmission (IPv4 and IPv6)
+- **UDP Support**: Stateless UDP packet forwarding with connection tracking (IPv4 and IPv6)
+- **IPv6 Support**: Comprehensive IPv6 support including:
+  - TCP and UDP connection handling
+  - ICMPv6 (Echo Request/Reply for ping6, Neighbor Discovery)
+  - Virtual TCP listeners for IPv6
+  - Proper IPv6 pseudo-header checksumming
+- **Virtual Listeners**: User-land TCP servers (IPv4 and IPv6) for fully virtual testing
 - **Automatic Cleanup**: Background maintenance for idle connection cleanup
 - **Thread-Safe**: Concurrent handling of multiple connections
 - **Zero Dependencies**: Uses only Go standard library
@@ -224,38 +230,50 @@ The function automatically detects the IP version (IPv4/IPv6) from the packet he
 
 **Supported IP Versions:**
 - IPv4 (version 4) - fully supported
-- IPv6 (version 6) - not yet implemented
+- IPv6 (version 6) - fully supported (TCP, UDP, ICMPv6, virtual listeners)
 
-**Supported Protocols (IPv4):**
-- TCP (protocol 6) - creates real connections or routes to virtual listeners
-- UDP (protocol 17) - creates real sockets or routes to virtual listeners (when implemented)
-- Virtual TCP listeners (packets destined for registered virtual addresses)
+**Supported Protocols:**
+- TCP (protocol 6) - creates real connections or routes to virtual listeners (IPv4 and IPv6)
+- UDP (protocol 17) - creates real sockets for packet forwarding (IPv4 and IPv6)
+- ICMPv6 (protocol 58) - Echo Request/Reply (ping6) and Neighbor Discovery (NDP)
+- Virtual TCP listeners (packets destined for registered virtual addresses, IPv4 and IPv6)
 
 #### `Listen`
 
 ```go
-func (s *Stack) Listen(network, address string) (*Listener, error)
+func (s *Stack) Listen(network, address string) (net.Listener, error)
 ```
 
 Creates a virtual TCP listener on a virtual network address within the slirp stack.
 
 **Parameters:**
-- `network`: Must be "tcp" or "tcp4"
-- `address`: Virtual IP:port to listen on (e.g., "10.0.0.1:8080")
+- `network`: Must be "tcp", "tcp4", or "tcp6"
+- `address`: Virtual IP:port to listen on (e.g., "10.0.0.1:8080" or "[::1]:8080")
 
 **Returns:**
 - `*Listener`: A listener that implements the `net.Listener` interface
 - `error`: Error if the address is invalid or already in use
 
-**Example:**
+**Examples:**
 ```go
-listener, err := stack.Listen("tcp", "192.168.100.1:9000")
+// IPv4 listener
+listener, err := stack.Listen("tcp4", "192.168.100.1:9000")
 if err != nil {
     log.Fatal(err)
 }
 defer listener.Close()
 
 conn, err := listener.Accept()
+// Handle connection...
+
+// IPv6 listener
+listener6, err := stack.Listen("tcp6", "[fe80::1]:9000")
+if err != nil {
+    log.Fatal(err)
+}
+defer listener6.Close()
+
+conn6, err := listener6.Accept()
 // Handle connection...
 ```
 
@@ -324,11 +342,12 @@ A background goroutine runs every 30 seconds to clean up:
 
 ## Limitations
 
-- IPv4 only (no IPv6 support)
-- No ICMP support (ping won't work through the NAT)
+- No ICMPv4 support (ping won't work for IPv4)
+- No IPv6 extension header handling
 - No IP fragmentation handling
 - Simplified TCP implementation (no congestion control, limited retransmission)
 - No support for TCP options beyond MSS
+- ICMPv6 Router Advertisement not yet implemented (Router Solicitation is ignored)
 
 ## License
 

@@ -20,19 +20,27 @@ type key struct {
 }
 
 type Stack struct {
-	mu        sync.RWMutex
-	tcp       map[key]*tcpConn
-	udp       map[key]*udpConn
-	listeners map[listenerKey]*Listener
-	virtTCP   map[key]*VirtualConn
+	mu         sync.RWMutex
+	tcp        map[key]*tcpConn
+	udp        map[key]*udpConn
+	tcp6       map[key6]*tcpConn6
+	udp6       map[key6]*udpConn6
+	listeners  map[listenerKey]*Listener
+	listeners6 map[listenerKey6]*Listener6
+	virtTCP    map[key]*VirtualConn
+	virtTCP6   map[key6]*VirtualConn6
 }
 
 func New() *Stack {
 	s := &Stack{
-		tcp:       make(map[key]*tcpConn),
-		udp:       make(map[key]*udpConn),
-		listeners: make(map[listenerKey]*Listener),
-		virtTCP:   make(map[key]*VirtualConn),
+		tcp:        make(map[key]*tcpConn),
+		udp:        make(map[key]*udpConn),
+		tcp6:       make(map[key6]*tcpConn6),
+		udp6:       make(map[key6]*udpConn6),
+		listeners:  make(map[listenerKey]*Listener),
+		listeners6: make(map[listenerKey6]*Listener6),
+		virtTCP:    make(map[key]*VirtualConn),
+		virtTCP6:   make(map[key6]*VirtualConn6),
 	}
 	go s.maintenance()
 	return s
@@ -40,7 +48,7 @@ func New() *Stack {
 
 // HandlePacket processes an IP packet (starting at IP header).
 // This handles traffic in both directions - there is no separate "inbound" handler.
-// Currently supports IPv4; IPv6 support can be added in the future.
+// Supports both IPv4 and IPv6 packets with TCP and UDP protocols.
 //
 // Parameters:
 //   - namespace: Identifier for connection isolation (use 0 for single namespace)
@@ -59,7 +67,7 @@ func (s *Stack) HandlePacket(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte
 	case 4:
 		return s.handleIPv4(namespace, clientMAC, gwMAC, packet, w)
 	case 6:
-		return errors.New("IPv6 not yet supported")
+		return s.handleIPv6(namespace, clientMAC, gwMAC, packet, w)
 	default:
 		return errors.New("unsupported IP version")
 	}
@@ -179,6 +187,19 @@ func (s *Stack) maintenance() {
 			}
 			c.mu.Unlock()
 		}
+		// TCP6 cleanup
+		for k, c := range s.tcp6 {
+			c.mu.Lock()
+			idle := now.Sub(c.lastAct)
+			closed := c.closed
+			if idle > 2*time.Minute || closed {
+				if c.conn != nil {
+					_ = c.conn.Close()
+				}
+				delete(s.tcp6, k)
+			}
+			c.mu.Unlock()
+		}
 		// UDP cleanup
 		for k, u := range s.udp {
 			u.mu.Lock()
@@ -191,6 +212,18 @@ func (s *Stack) maintenance() {
 			}
 			u.mu.Unlock()
 		}
+		// UDP6 cleanup
+		for k, u := range s.udp6 {
+			u.mu.Lock()
+			idle := now.Sub(u.lastAct)
+			if idle > 60*time.Second {
+				if u.conn != nil {
+					_ = u.conn.Close()
+				}
+				delete(s.udp6, k)
+			}
+			u.mu.Unlock()
+		}
 		// Virtual TCP cleanup
 		for k, vc := range s.virtTCP {
 			vc.mu.Lock()
@@ -199,6 +232,17 @@ func (s *Stack) maintenance() {
 			if idle > 2*time.Minute || closed {
 				_ = vc.Close()
 				delete(s.virtTCP, k)
+			}
+			vc.mu.Unlock()
+		}
+		// Virtual TCP6 cleanup
+		for k, vc := range s.virtTCP6 {
+			vc.mu.Lock()
+			idle := now.Sub(vc.lastAct)
+			closed := vc.closed
+			if idle > 2*time.Minute || closed {
+				_ = vc.Close()
+				delete(s.virtTCP6, k)
 			}
 			vc.mu.Unlock()
 		}

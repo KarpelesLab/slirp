@@ -29,6 +29,7 @@ type Stack struct {
 	listeners6 map[listenerKey6]*Listener6
 	virtTCP    map[key]*VirtualConn
 	virtTCP6   map[key6]*VirtualConn6
+	done       chan struct{}
 }
 
 func New() *Stack {
@@ -41,9 +42,85 @@ func New() *Stack {
 		listeners6: make(map[listenerKey6]*Listener6),
 		virtTCP:    make(map[key]*VirtualConn),
 		virtTCP6:   make(map[key6]*VirtualConn6),
+		done:       make(chan struct{}),
 	}
 	go s.maintenance()
 	return s
+}
+
+// Close shuts down the stack, stopping the maintenance goroutine and
+// closing all active connections.
+func (s *Stack) Close() error {
+	close(s.done)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Close all TCP connections
+	for k, c := range s.tcp {
+		c.mu.Lock()
+		c.closed = true
+		if c.conn != nil {
+			_ = c.conn.Close()
+		}
+		c.mu.Unlock()
+		c.cond.Broadcast()
+		delete(s.tcp, k)
+	}
+	// Close all TCP6 connections
+	for k, c := range s.tcp6 {
+		c.mu.Lock()
+		c.closed = true
+		if c.conn != nil {
+			_ = c.conn.Close()
+		}
+		c.mu.Unlock()
+		c.cond.Broadcast()
+		delete(s.tcp6, k)
+	}
+	// Close all UDP connections
+	for k, u := range s.udp {
+		u.mu.Lock()
+		if u.conn != nil {
+			_ = u.conn.Close()
+		}
+		u.mu.Unlock()
+		delete(s.udp, k)
+	}
+	// Close all UDP6 connections
+	for k, u := range s.udp6 {
+		u.mu.Lock()
+		if u.conn != nil {
+			_ = u.conn.Close()
+		}
+		u.mu.Unlock()
+		delete(s.udp6, k)
+	}
+	// Close all virtual TCP connections
+	for k, vc := range s.virtTCP {
+		vc.closed.Store(true)
+		vc.recvCond.Broadcast()
+		vc.sendCond.Broadcast()
+		delete(s.virtTCP, k)
+	}
+	// Close all virtual TCP6 connections
+	for k, vc := range s.virtTCP6 {
+		vc.closed.Store(true)
+		vc.recvCond.Broadcast()
+		vc.sendCond.Broadcast()
+		delete(s.virtTCP6, k)
+	}
+	// Close all listeners
+	for k, l := range s.listeners {
+		l.closeOnce.Do(func() { close(l.closeCh) })
+		delete(s.listeners, k)
+	}
+	for k, l := range s.listeners6 {
+		l.closeOnce.Do(func() { close(l.closeCh) })
+		delete(s.listeners6, k)
+	}
+
+	return nil
 }
 
 // HandlePacket processes an IP packet (starting at IP header).
@@ -171,7 +248,12 @@ func (s *Stack) handleIPv4(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, 
 func (s *Stack) maintenance() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+		}
 		now := time.Now()
 		s.mu.Lock()
 		// TCP cleanup
@@ -180,12 +262,16 @@ func (s *Stack) maintenance() {
 			idle := now.Sub(c.lastAct)
 			closed := c.closed
 			if idle > 2*time.Minute || closed {
+				c.closed = true
 				if c.conn != nil {
 					_ = c.conn.Close()
 				}
 				delete(s.tcp, k)
 			}
 			c.mu.Unlock()
+			if idle > 2*time.Minute || closed {
+				c.cond.Broadcast()
+			}
 		}
 		// TCP6 cleanup
 		for k, c := range s.tcp6 {
@@ -193,12 +279,16 @@ func (s *Stack) maintenance() {
 			idle := now.Sub(c.lastAct)
 			closed := c.closed
 			if idle > 2*time.Minute || closed {
+				c.closed = true
 				if c.conn != nil {
 					_ = c.conn.Close()
 				}
 				delete(s.tcp6, k)
 			}
 			c.mu.Unlock()
+			if idle > 2*time.Minute || closed {
+				c.cond.Broadcast()
+			}
 		}
 		// UDP cleanup
 		for k, u := range s.udp {
@@ -228,23 +318,31 @@ func (s *Stack) maintenance() {
 		for k, vc := range s.virtTCP {
 			vc.mu.Lock()
 			idle := now.Sub(vc.lastAct)
-			closed := vc.closed
+			closed := vc.closed.Load()
 			if idle > 2*time.Minute || closed {
-				_ = vc.Close()
+				vc.closed.Store(true)
 				delete(s.virtTCP, k)
 			}
 			vc.mu.Unlock()
+			if idle > 2*time.Minute || closed {
+				vc.recvCond.Broadcast()
+				vc.sendCond.Broadcast()
+			}
 		}
 		// Virtual TCP6 cleanup
 		for k, vc := range s.virtTCP6 {
 			vc.mu.Lock()
 			idle := now.Sub(vc.lastAct)
-			closed := vc.closed
+			closed := vc.closed.Load()
 			if idle > 2*time.Minute || closed {
-				_ = vc.Close()
+				vc.closed.Store(true)
 				delete(s.virtTCP6, k)
 			}
 			vc.mu.Unlock()
+			if idle > 2*time.Minute || closed {
+				vc.recvCond.Broadcast()
+				vc.sendCond.Broadcast()
+			}
 		}
 		s.mu.Unlock()
 	}
@@ -315,6 +413,12 @@ func udpChecksum(src, dst []byte, udp []byte, payload []byte) uint16 {
 		sum = (sum & 0xFFFF) + (sum >> 16)
 	}
 	return ^uint16(sum)
+}
+
+// seqAfter reports whether TCP sequence number a is after b,
+// handling 32-bit wraparound via signed comparison.
+func seqAfter(a, b uint32) bool {
+	return int32(a-b) > 0
 }
 
 func randUint32() uint32 {

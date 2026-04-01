@@ -71,8 +71,15 @@ func (t *tcpConn) handleOutbound(ip []byte) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.lastAct = time.Now()
-	if wnd != 0 {
-		t.recvWnd = wnd
+	t.recvWnd = wnd
+
+	// RST - tear down connection immediately
+	if (flags & 0x04) != 0 {
+		if t.conn != nil {
+			_ = t.conn.Close()
+		}
+		t.closed = true
+		return nil
 	}
 
 	if t.conn == nil && (flags&0x02) != 0 { // SYN
@@ -142,12 +149,22 @@ func (t *tcpConn) handleOutbound(ip []byte) error {
 			_ = t.w(pkt)
 			t.cond.Broadcast()
 		}
+		// Check for piggy-backed FIN
+		if (flags & 0x01) != 0 {
+			t.cSeq += 1
+			if t.conn != nil {
+				_ = t.conn.Close()
+			}
+			pkt := buildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
+			_ = t.w(pkt)
+			t.closed = true
+		}
 		return nil
 	}
 
 	// Pure ACKs: advance unacked and flush queued data
 	if (flags&0x10) != 0 && len(payload) == 0 {
-		if ack > t.sAck {
+		if seqAfter(ack, t.sAck) {
 			adv := ack - t.sAck
 			if adv <= t.sUnacked {
 				t.sUnacked -= adv

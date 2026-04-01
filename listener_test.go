@@ -375,9 +375,7 @@ func TestVirtualConnClose(t *testing.T) {
 	}
 
 	// Verify closed state
-	vc.mu.Lock()
-	closed := vc.closed
-	vc.mu.Unlock()
+	closed := vc.closed.Load()
 
 	if !closed {
 		t.Error("connection should be marked as closed")

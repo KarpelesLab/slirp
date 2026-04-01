@@ -124,8 +124,8 @@ func (s *Stack) handleICMPv6NeighborSolicitation(clientMAC, gwMAC [6]byte, packe
 	na[25] = 1   // Length: 1 (in units of 8 bytes)
 	copy(na[26:32], gwMAC[:]) // Our MAC address
 
-	// Calculate checksum
-	checksum := ipv6Checksum(dstIP, srcIP, 58, uint32(len(na)), na)
+	// Calculate checksum (source must be target address, not dstIP which may be multicast)
+	checksum := ipv6Checksum(targetAddr, srcIP, 58, uint32(len(na)), na)
 	binary.BigEndian.PutUint16(na[2:4], checksum)
 
 	// Build IPv6 header
@@ -134,8 +134,8 @@ func (s *Stack) handleICMPv6NeighborSolicitation(clientMAC, gwMAC [6]byte, packe
 	binary.BigEndian.PutUint16(ip[4:6], uint16(len(na)))
 	ip[6] = 58 // Next Header: ICMPv6
 	ip[7] = 255 // Hop Limit (must be 255 for NDP)
-	copy(ip[8:24], dstIP[:])   // Source = target address
-	copy(ip[24:40], srcIP[:])  // Dest = original source
+	copy(ip[8:24], targetAddr[:])  // Source = target address being resolved
+	copy(ip[24:40], srcIP[:])      // Dest = original source
 
 	// Build Ethernet frame
 	frame := make([]byte, 14+len(ip)+len(na))

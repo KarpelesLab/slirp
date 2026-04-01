@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -202,7 +203,7 @@ type VirtualConn struct {
 
 	// Connection state
 	mu         sync.Mutex
-	closed     bool
+	closed     atomic.Bool
 	clientMAC  [6]byte
 	gwMAC      [6]byte
 	w          Writer
@@ -236,11 +237,7 @@ func (vc *VirtualConn) Read(b []byte) (int, error) {
 	defer vc.recvMu.Unlock()
 
 	for len(vc.recvBuf) == 0 {
-		vc.mu.Lock()
-		closed := vc.closed
-		vc.mu.Unlock()
-
-		if closed {
+		if vc.closed.Load() {
 			return 0, io.EOF
 		}
 		vc.recvCond.Wait()
@@ -253,12 +250,9 @@ func (vc *VirtualConn) Read(b []byte) (int, error) {
 
 // Write writes data to the connection (data to send to the client).
 func (vc *VirtualConn) Write(b []byte) (int, error) {
-	vc.mu.Lock()
-	if vc.closed {
-		vc.mu.Unlock()
+	if vc.closed.Load() {
 		return 0, errors.New("connection closed")
 	}
-	vc.mu.Unlock()
 
 	vc.sendMu.Lock()
 	vc.sendBuf = append(vc.sendBuf, b...)
@@ -321,8 +315,14 @@ func (vc *VirtualConn) handleInbound(ip []byte) error {
 	defer vc.mu.Unlock()
 
 	vc.lastAct = time.Now()
-	if wnd != 0 {
-		vc.clientWnd = wnd
+	vc.clientWnd = wnd
+
+	// RST - tear down connection immediately
+	if (flags & 0x04) != 0 {
+		vc.closed.Store(true)
+		vc.recvCond.Broadcast()
+		vc.sendCond.Broadcast()
+		return nil
 	}
 
 	// Handle SYN (should already be handled, but complete handshake)
@@ -362,7 +362,7 @@ func (vc *VirtualConn) handleInbound(ip []byte) error {
 	if (flags & 0x01) != 0 {
 		vc.clientSeq += 1
 		vc.ack = vc.clientSeq
-		vc.closed = true
+		vc.closed.Store(true)
 
 		// Send FIN+ACK
 		pkt := buildTCPPacket(vc.gwMAC, vc.clientMAC,
@@ -381,19 +381,21 @@ func (vc *VirtualConn) handleInbound(ip []byte) error {
 // Close closes the connection.
 func (vc *VirtualConn) Close() error {
 	vc.mu.Lock()
-	if vc.closed {
+	if vc.closed.Load() {
 		vc.mu.Unlock()
 		return nil
 	}
-	vc.closed = true
+	vc.closed.Store(true)
+	shouldFin := vc.established
+	seq, ack := vc.seq, vc.ack
 	vc.mu.Unlock()
 
-	// Send FIN
-	if vc.established {
+	// Send FIN using captured values
+	if shouldFin {
 		pkt := buildTCPPacket(vc.gwMAC, vc.clientMAC,
 			[4]byte(vc.localAddr.IP.To4()), [4]byte(vc.remoteAddr.IP.To4()),
 			uint16(vc.localAddr.Port), uint16(vc.remoteAddr.Port),
-			vc.seq, vc.ack, 0x11, nil) // FIN+ACK
+			seq, ack, 0x11, nil) // FIN+ACK
 		_ = vc.w(pkt)
 	}
 

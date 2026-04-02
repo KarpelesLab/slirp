@@ -42,9 +42,9 @@ func TestIPChecksum(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := ipChecksum(tt.header)
+			result := IPChecksum(tt.header)
 			if result != tt.expected {
-				t.Errorf("ipChecksum() = 0x%04x, expected 0x%04x", result, tt.expected)
+				t.Errorf("IPChecksum() = 0x%04x, expected 0x%04x", result, tt.expected)
 			}
 		})
 	}
@@ -66,9 +66,9 @@ func TestTCPChecksum(t *testing.T) {
 	payload := []byte("Hello, World!")
 
 	// Just verify it returns a non-zero checksum
-	result := tcpChecksum(src, dst, tcp, payload)
+	result := TCPChecksum(src, dst, tcp, payload)
 	if result == 0 {
-		t.Error("tcpChecksum() returned 0, expected non-zero value")
+		t.Error("TCPChecksum() returned 0, expected non-zero value")
 	}
 }
 
@@ -83,9 +83,9 @@ func TestUDPChecksum(t *testing.T) {
 	}
 	payload := []byte("test data")
 
-	result := udpChecksum(src, dst, udp, payload)
+	result := UDPChecksum(src, dst, udp, payload)
 	if result == 0 {
-		t.Error("udpChecksum() returned 0, expected non-zero value")
+		t.Error("UDPChecksum() returned 0, expected non-zero value")
 	}
 }
 
@@ -93,12 +93,12 @@ func TestRandUint32(t *testing.T) {
 	// Test that it returns different values
 	seen := make(map[uint32]bool)
 	for i := 0; i < 100; i++ {
-		val := randUint32()
+		val := RandUint32()
 		seen[val] = true
 	}
 	// We should have at least some variety
 	if len(seen) < 50 {
-		t.Errorf("randUint32() not random enough: only %d unique values in 100 calls", len(seen))
+		t.Errorf("RandUint32() not random enough: only %d unique values in 100 calls", len(seen))
 	}
 }
 

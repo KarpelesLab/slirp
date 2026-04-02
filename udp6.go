@@ -98,7 +98,7 @@ func (u *udpConn6) readLoop() {
 			udpWithPayload = udp
 		}
 		binary.BigEndian.PutUint16(udp[6:8], 0)
-		binary.BigEndian.PutUint16(udp[6:8], ipv6Checksum(u.rIP, u.cSrcIP, 17, uint32(len(udpWithPayload)), udpWithPayload))
+		binary.BigEndian.PutUint16(udp[6:8], IPv6Checksum(u.rIP, u.cSrcIP, 17, uint32(len(udpWithPayload)), udpWithPayload))
 
 		// Build Ethernet frame
 		frame := make([]byte, 14+len(ip)+len(udp)+len(data))

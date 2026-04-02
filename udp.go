@@ -78,14 +78,14 @@ func (u *udpConn) readLoop() {
 		copy(ip[12:16], u.rIP[:])
 		copy(ip[16:20], u.cSrcIP[:])
 		binary.BigEndian.PutUint16(ip[10:12], 0)
-		binary.BigEndian.PutUint16(ip[10:12], ipChecksum(ip))
+		binary.BigEndian.PutUint16(ip[10:12], IPChecksum(ip))
 
 		udp := make([]byte, uh)
 		binary.BigEndian.PutUint16(udp[0:2], u.rPort)
 		binary.BigEndian.PutUint16(udp[2:4], u.cSrcPort)
 		binary.BigEndian.PutUint16(udp[4:6], uint16(uh+len(data)))
 		binary.BigEndian.PutUint16(udp[6:8], 0)
-		binary.BigEndian.PutUint16(udp[6:8], udpChecksum(ip[12:16], ip[16:20], udp, data))
+		binary.BigEndian.PutUint16(udp[6:8], UDPChecksum(ip[12:16], ip[16:20], udp, data))
 
 		frame := make([]byte, 14+len(ip)+len(udp)+len(data))
 		copy(frame[0:6], u.clientMAC[:])

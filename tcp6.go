@@ -98,7 +98,7 @@ func (t *tcpConn6) handleOutbound(packet []byte) error {
 		}
 		t.conn = c
 		t.cSeq = seq + 1
-		t.sSeq = randUint32()
+		t.sSeq = RandUint32()
 		t.sAck = t.cSeq
 		// parse MSS option if present in SYN
 		if doff > 20 {
@@ -129,7 +129,7 @@ func (t *tcpConn6) handleOutbound(packet []byte) error {
 			}
 		}
 		// send SYN-ACK
-		pkt := buildTCPPacket6(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.sAck, 0x12, nil)
+		pkt := BuildTCPPacket6(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.sAck, 0x12, nil)
 		_ = t.w(pkt)
 		// reader goroutine
 		go t.readFromRemote()
@@ -151,7 +151,7 @@ func (t *tcpConn6) handleOutbound(packet []byte) error {
 			_, _ = t.conn.Write(payload)
 			t.cSeq += uint32(len(payload))
 			// send ACK back
-			pkt := buildTCPPacket6(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x10, nil)
+			pkt := BuildTCPPacket6(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x10, nil)
 			_ = t.w(pkt)
 			t.cond.Broadcast()
 		}
@@ -161,7 +161,7 @@ func (t *tcpConn6) handleOutbound(packet []byte) error {
 			if t.conn != nil {
 				_ = t.conn.Close()
 			}
-			pkt := buildTCPPacket6(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
+			pkt := BuildTCPPacket6(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
 			_ = t.w(pkt)
 			t.closed = true
 		}
@@ -170,7 +170,7 @@ func (t *tcpConn6) handleOutbound(packet []byte) error {
 
 	// Pure ACKs: advance unacked and flush queued data
 	if (flags&0x10) != 0 && len(payload) == 0 {
-		if seqAfter(ack, t.sAck) {
+		if SeqAfter(ack, t.sAck) {
 			adv := ack - t.sAck
 			if adv <= t.sUnacked {
 				t.sUnacked -= adv
@@ -180,7 +180,7 @@ func (t *tcpConn6) handleOutbound(packet []byte) error {
 			t.sAck = ack
 			t.flushSendQ()
 			if t.finPending && len(t.sendQ) == 0 && t.sUnacked == 0 {
-				pkt := buildTCPPacket6(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
+				pkt := BuildTCPPacket6(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
 				_ = t.w(pkt)
 				t.finPending = false
 			}
@@ -195,7 +195,7 @@ func (t *tcpConn6) handleOutbound(packet []byte) error {
 			_ = t.conn.Close()
 		}
 		// send FIN-ACK
-		pkt := buildTCPPacket6(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
+		pkt := BuildTCPPacket6(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
 		_ = t.w(pkt)
 		t.closed = true
 		return nil
@@ -214,7 +214,7 @@ func (t *tcpConn6) readFromRemote() {
 			}
 			t.mu.Lock()
 			if len(t.sendQ) == 0 && t.sUnacked == 0 {
-				pkt := buildTCPPacket6(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
+				pkt := BuildTCPPacket6(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
 				t.mu.Unlock()
 				_ = t.w(pkt)
 				return
@@ -250,7 +250,7 @@ func (t *tcpConn6) flushSendQ() {
 		if len(seg) > avail {
 			seg = seg[:avail]
 		}
-		pkt := buildTCPPacket6(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x18, seg)
+		pkt := BuildTCPPacket6(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x18, seg)
 		_ = t.w(pkt)
 		t.sSeq += uint32(len(seg))
 		t.sUnacked += uint32(len(seg))
@@ -270,14 +270,14 @@ func (t *tcpConn6) maintenanceLoop() {
 			return
 		}
 		if (len(t.sendQ) > 0 || t.sUnacked > 0) && (int(t.recvWnd)-int(t.sUnacked) <= 0) {
-			pkt := buildTCPPacket6(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq-1, t.cSeq, 0x10, nil)
+			pkt := BuildTCPPacket6(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq-1, t.cSeq, 0x10, nil)
 			_ = t.w(pkt)
 		}
 		t.mu.Unlock()
 	}
 }
 
-func buildTCPPacket6(srcMAC, dstMAC [6]byte, srcIP, dstIP [16]byte, srcPort, dstPort uint16, seq, ack uint32, flags uint8, payload []byte) []byte {
+func BuildTCPPacket6(srcMAC, dstMAC [6]byte, srcIP, dstIP [16]byte, srcPort, dstPort uint16, seq, ack uint32, flags uint8, payload []byte) []byte {
 	// IPv6 header (40 bytes)
 	thl := 20
 	payloadLen := thl + len(payload)
@@ -321,7 +321,7 @@ func buildTCPPacket6(srcMAC, dstMAC [6]byte, srcIP, dstIP [16]byte, srcPort, dst
 		tcpWithPayload = tcp
 	}
 	binary.BigEndian.PutUint16(tcp[16:18], 0)
-	binary.BigEndian.PutUint16(tcp[16:18], ipv6Checksum(srcIP, dstIP, 6, uint32(len(tcpWithPayload)), tcpWithPayload))
+	binary.BigEndian.PutUint16(tcp[16:18], IPv6Checksum(srcIP, dstIP, 6, uint32(len(tcpWithPayload)), tcpWithPayload))
 
 	// Build Ethernet frame
 	frame := make([]byte, 14+len(ip)+len(tcp)+len(payload))

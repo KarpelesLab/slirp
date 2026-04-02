@@ -47,7 +47,7 @@ func TestBuildTCPPacket(t *testing.T) {
 	dstIP := [4]byte{8, 8, 8, 8}
 	payload := []byte("test data")
 
-	pkt := buildTCPPacket(srcMAC, dstMAC, srcIP, dstIP, 12345, 80, 1000, 2000, 0x18, payload)
+	pkt := BuildTCPPacket(srcMAC, dstMAC, srcIP, dstIP, 12345, 80, 1000, 2000, 0x18, payload)
 
 	// Check Ethernet header (14 bytes)
 	if len(pkt) < 14 {
@@ -286,7 +286,7 @@ func createTCPPacket(srcIP, dstIP [4]byte, srcPort, dstPort uint16, seq, ack uin
 	ip[9] = 6        // Protocol: TCP
 	copy(ip[12:16], srcIP[:])
 	copy(ip[16:20], dstIP[:])
-	binary.BigEndian.PutUint16(ip[10:12], ipChecksum(ip))
+	binary.BigEndian.PutUint16(ip[10:12], IPChecksum(ip))
 
 	tcp := make([]byte, thl)
 	binary.BigEndian.PutUint16(tcp[0:2], srcPort)
@@ -296,7 +296,7 @@ func createTCPPacket(srcIP, dstIP [4]byte, srcPort, dstPort uint16, seq, ack uin
 	tcp[12] = (5 << 4) // Data offset
 	tcp[13] = flags
 	binary.BigEndian.PutUint16(tcp[14:16], 65535) // Window
-	binary.BigEndian.PutUint16(tcp[16:18], tcpChecksum(ip[12:16], ip[16:20], tcp, payload))
+	binary.BigEndian.PutUint16(tcp[16:18], TCPChecksum(ip[12:16], ip[16:20], tcp, payload))
 
 	pkt := make([]byte, len(ip)+len(tcp)+len(payload))
 	copy(pkt, ip)
@@ -318,7 +318,7 @@ func createTCPPacketWithMSS(srcIP, dstIP [4]byte, srcPort, dstPort uint16, seq, 
 	ip[9] = 6
 	copy(ip[12:16], srcIP[:])
 	copy(ip[16:20], dstIP[:])
-	binary.BigEndian.PutUint16(ip[10:12], ipChecksum(ip))
+	binary.BigEndian.PutUint16(ip[10:12], IPChecksum(ip))
 
 	tcp := make([]byte, thl)
 	binary.BigEndian.PutUint16(tcp[0:2], srcPort)
@@ -334,7 +334,7 @@ func createTCPPacketWithMSS(srcIP, dstIP [4]byte, srcPort, dstPort uint16, seq, 
 	tcp[21] = 4  // Length: 4 bytes
 	binary.BigEndian.PutUint16(tcp[22:24], mss)
 
-	binary.BigEndian.PutUint16(tcp[16:18], tcpChecksum(ip[12:16], ip[16:20], tcp, payload))
+	binary.BigEndian.PutUint16(tcp[16:18], TCPChecksum(ip[12:16], ip[16:20], tcp, payload))
 
 	pkt := make([]byte, len(ip)+len(tcp)+len(payload))
 	copy(pkt, ip)

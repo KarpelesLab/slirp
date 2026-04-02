@@ -188,7 +188,7 @@ func (s *Stack) handleIPv4(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, 
 				s.virtTCP[k] = vc
 
 				// Send SYN-ACK
-				pkt := buildTCPPacket(gwMAC, clientMAC, dstIP, srcIP, dstPort, srcPort, vc.seq, vc.ack, 0x12, nil)
+				pkt := BuildTCPPacket(gwMAC, clientMAC, dstIP, srcIP, dstPort, srcPort, vc.seq, vc.ack, 0x12, nil)
 				s.mu.Unlock()
 				_ = w(pkt)
 
@@ -349,7 +349,8 @@ func (s *Stack) maintenance() {
 }
 
 // Utilities shared by TCP/UDP
-func ipChecksum(hdr []byte) uint16 {
+// IPChecksum computes the Internet checksum (RFC 1071) over the given header bytes.
+func IPChecksum(hdr []byte) uint16 {
 	var sum uint32
 	for i := 0; i+1 < len(hdr); i += 2 {
 		sum += uint32(binary.BigEndian.Uint16(hdr[i : i+2]))
@@ -363,7 +364,8 @@ func ipChecksum(hdr []byte) uint16 {
 	return ^uint16(sum)
 }
 
-func tcpChecksum(src, dst []byte, tcp []byte, payload []byte) uint16 {
+// TCPChecksum computes the TCP checksum including the IPv4 pseudo-header.
+func TCPChecksum(src, dst []byte, tcp []byte, payload []byte) uint16 {
 	var sum uint32
 	sum += uint32(binary.BigEndian.Uint16(src[0:2]))
 	sum += uint32(binary.BigEndian.Uint16(src[2:4]))
@@ -389,7 +391,8 @@ func tcpChecksum(src, dst []byte, tcp []byte, payload []byte) uint16 {
 	return ^uint16(sum)
 }
 
-func udpChecksum(src, dst []byte, udp []byte, payload []byte) uint16 {
+// UDPChecksum computes the UDP checksum including the IPv4 pseudo-header.
+func UDPChecksum(src, dst []byte, udp []byte, payload []byte) uint16 {
 	var sum uint32
 	sum += uint32(binary.BigEndian.Uint16(src[0:2]))
 	sum += uint32(binary.BigEndian.Uint16(src[2:4]))
@@ -415,13 +418,14 @@ func udpChecksum(src, dst []byte, udp []byte, payload []byte) uint16 {
 	return ^uint16(sum)
 }
 
-// seqAfter reports whether TCP sequence number a is after b,
+// SeqAfter reports whether TCP sequence number a is after b,
 // handling 32-bit wraparound via signed comparison.
-func seqAfter(a, b uint32) bool {
+func SeqAfter(a, b uint32) bool {
 	return int32(a-b) > 0
 }
 
-func randUint32() uint32 {
+// RandUint32 returns a cryptographically random uint32.
+func RandUint32() uint32 {
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return uint32(time.Now().UnixNano())

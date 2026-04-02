@@ -69,7 +69,7 @@ func (s *Stack) handleICMPv6EchoRequest(clientMAC, gwMAC [6]byte, packet []byte,
 
 	// Recalculate checksum
 	binary.BigEndian.PutUint16(replyICMP[2:4], 0)
-	checksum := ipv6Checksum(dstIP, srcIP, 58, uint32(len(replyICMP)), replyICMP)
+	checksum := IPv6Checksum(dstIP, srcIP, 58, uint32(len(replyICMP)), replyICMP)
 	binary.BigEndian.PutUint16(replyICMP[2:4], checksum)
 
 	// Build IPv6 header
@@ -125,7 +125,7 @@ func (s *Stack) handleICMPv6NeighborSolicitation(clientMAC, gwMAC [6]byte, packe
 	copy(na[26:32], gwMAC[:]) // Our MAC address
 
 	// Calculate checksum (source must be target address, not dstIP which may be multicast)
-	checksum := ipv6Checksum(targetAddr, srcIP, 58, uint32(len(na)), na)
+	checksum := IPv6Checksum(targetAddr, srcIP, 58, uint32(len(na)), na)
 	binary.BigEndian.PutUint16(na[2:4], checksum)
 
 	// Build IPv6 header

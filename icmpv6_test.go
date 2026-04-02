@@ -47,7 +47,7 @@ func TestICMPv6EchoRequest(t *testing.T) {
 	var srcIP, dstIP [16]byte
 	copy(srcIP[:], packet[8:24])
 	copy(dstIP[:], packet[24:40])
-	checksum := ipv6Checksum(srcIP, dstIP, 58, uint32(len(icmp)), icmp)
+	checksum := IPv6Checksum(srcIP, dstIP, 58, uint32(len(icmp)), icmp)
 	binary.BigEndian.PutUint16(icmp[2:4], checksum)
 
 	err := s.HandlePacket(0, clientMAC, gwMAC, packet, writer)
@@ -155,7 +155,7 @@ func TestICMPv6NeighborSolicitation(t *testing.T) {
 	var srcIP, dstIP [16]byte
 	copy(srcIP[:], packet[8:24])
 	copy(dstIP[:], packet[24:40])
-	checksum := ipv6Checksum(srcIP, dstIP, 58, uint32(len(icmp)), icmp)
+	checksum := IPv6Checksum(srcIP, dstIP, 58, uint32(len(icmp)), icmp)
 	binary.BigEndian.PutUint16(icmp[2:4], checksum)
 
 	err := s.HandlePacket(0, clientMAC, gwMAC, packet, writer)
@@ -262,7 +262,7 @@ func TestICMPv6RouterSolicitation(t *testing.T) {
 	var srcIP, dstIP [16]byte
 	copy(srcIP[:], packet[8:24])
 	copy(dstIP[:], packet[24:40])
-	checksum := ipv6Checksum(srcIP, dstIP, 58, uint32(len(icmp)), icmp)
+	checksum := IPv6Checksum(srcIP, dstIP, 58, uint32(len(icmp)), icmp)
 	binary.BigEndian.PutUint16(icmp[2:4], checksum)
 
 	err := s.HandlePacket(0, clientMAC, gwMAC, packet, writer)

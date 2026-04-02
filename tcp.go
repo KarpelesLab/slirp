@@ -91,7 +91,7 @@ func (t *tcpConn) handleOutbound(ip []byte) error {
 		}
 		t.conn = c
 		t.cSeq = seq + 1
-		t.sSeq = randUint32()
+		t.sSeq = RandUint32()
 		t.sAck = t.cSeq
 		// parse MSS option if present in SYN
 		if doff > 20 {
@@ -122,7 +122,7 @@ func (t *tcpConn) handleOutbound(ip []byte) error {
 			}
 		}
 		// send SYN-ACK
-		pkt := buildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.sAck, 0x12, nil)
+		pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.sAck, 0x12, nil)
 		_ = t.w(pkt)
 		// reader goroutine
 		go t.readFromRemote()
@@ -145,7 +145,7 @@ func (t *tcpConn) handleOutbound(ip []byte) error {
 			_, _ = t.conn.Write(payload)
 			t.cSeq += uint32(len(payload))
 			// send ACK back
-			pkt := buildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x10, nil)
+			pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x10, nil)
 			_ = t.w(pkt)
 			t.cond.Broadcast()
 		}
@@ -155,7 +155,7 @@ func (t *tcpConn) handleOutbound(ip []byte) error {
 			if t.conn != nil {
 				_ = t.conn.Close()
 			}
-			pkt := buildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
+			pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
 			_ = t.w(pkt)
 			t.closed = true
 		}
@@ -164,7 +164,7 @@ func (t *tcpConn) handleOutbound(ip []byte) error {
 
 	// Pure ACKs: advance unacked and flush queued data
 	if (flags&0x10) != 0 && len(payload) == 0 {
-		if seqAfter(ack, t.sAck) {
+		if SeqAfter(ack, t.sAck) {
 			adv := ack - t.sAck
 			if adv <= t.sUnacked {
 				t.sUnacked -= adv
@@ -174,7 +174,7 @@ func (t *tcpConn) handleOutbound(ip []byte) error {
 			t.sAck = ack
 			t.flushSendQ()
 			if t.finPending && len(t.sendQ) == 0 && t.sUnacked == 0 {
-				pkt := buildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
+				pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
 				_ = t.w(pkt)
 				t.finPending = false
 			}
@@ -189,7 +189,7 @@ func (t *tcpConn) handleOutbound(ip []byte) error {
 			_ = t.conn.Close()
 		}
 		// send FIN-ACK
-		pkt := buildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
+		pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
 		_ = t.w(pkt)
 		t.closed = true
 		return nil
@@ -208,7 +208,7 @@ func (t *tcpConn) readFromRemote() {
 			}
 			t.mu.Lock()
 			if len(t.sendQ) == 0 && t.sUnacked == 0 {
-				pkt := buildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
+				pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
 				t.mu.Unlock()
 				_ = t.w(pkt)
 				return
@@ -244,7 +244,7 @@ func (t *tcpConn) flushSendQ() {
 		if len(seg) > avail {
 			seg = seg[:avail]
 		}
-		pkt := buildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x18, seg)
+		pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x18, seg)
 		_ = t.w(pkt)
 		t.sSeq += uint32(len(seg))
 		t.sUnacked += uint32(len(seg))
@@ -264,14 +264,14 @@ func (t *tcpConn) maintenanceLoop() {
 			return
 		}
 		if (len(t.sendQ) > 0 || t.sUnacked > 0) && (int(t.recvWnd)-int(t.sUnacked) <= 0) {
-			pkt := buildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq-1, t.cSeq, 0x10, nil)
+			pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq-1, t.cSeq, 0x10, nil)
 			_ = t.w(pkt)
 		}
 		t.mu.Unlock()
 	}
 }
 
-func buildTCPPacket(srcMAC, dstMAC [6]byte, srcIP, dstIP [4]byte, srcPort, dstPort uint16, seq, ack uint32, flags uint8, payload []byte) []byte {
+func BuildTCPPacket(srcMAC, dstMAC [6]byte, srcIP, dstIP [4]byte, srcPort, dstPort uint16, seq, ack uint32, flags uint8, payload []byte) []byte {
 	// IP header
 	ihl := 20
 	thl := 20
@@ -285,7 +285,7 @@ func buildTCPPacket(srcMAC, dstMAC [6]byte, srcIP, dstIP [4]byte, srcPort, dstPo
 	copy(ip[12:16], srcIP[:])
 	copy(ip[16:20], dstIP[:])
 	binary.BigEndian.PutUint16(ip[10:12], 0)
-	binary.BigEndian.PutUint16(ip[10:12], ipChecksum(ip))
+	binary.BigEndian.PutUint16(ip[10:12], IPChecksum(ip))
 
 	tcp := make([]byte, thl)
 	binary.BigEndian.PutUint16(tcp[0:2], srcPort)
@@ -296,7 +296,7 @@ func buildTCPPacket(srcMAC, dstMAC [6]byte, srcIP, dstIP [4]byte, srcPort, dstPo
 	tcp[13] = flags
 	binary.BigEndian.PutUint16(tcp[14:16], 65535)
 	binary.BigEndian.PutUint16(tcp[16:18], 0)
-	binary.BigEndian.PutUint16(tcp[16:18], tcpChecksum(ip[12:16], ip[16:20], tcp, payload))
+	binary.BigEndian.PutUint16(tcp[16:18], TCPChecksum(ip[12:16], ip[16:20], tcp, payload))
 
 	frame := make([]byte, 14+len(ip)+len(tcp)+len(payload))
 	copy(frame[0:6], dstMAC[:])

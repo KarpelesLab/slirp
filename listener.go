@@ -222,7 +222,7 @@ func newVirtualConn(localIP [4]byte, localPort uint16, remoteIP [4]byte, remoteP
 		clientMAC:  clientMAC,
 		gwMAC:      gwMAC,
 		w:          w,
-		seq:        randUint32(),
+		seq:        RandUint32(),
 		clientWnd:  65535,
 		lastAct:    time.Now(),
 	}
@@ -267,15 +267,13 @@ func (vc *VirtualConn) Write(b []byte) (int, error) {
 // flush sends queued data to the client.
 func (vc *VirtualConn) flush() {
 	vc.mu.Lock()
-	defer vc.mu.Unlock()
-
 	if !vc.established {
+		vc.mu.Unlock()
 		return
 	}
 
 	vc.sendMu.Lock()
-	defer vc.sendMu.Unlock()
-
+	var pkts [][]byte
 	const maxSegment = 1460
 	for len(vc.sendBuf) > 0 {
 		segment := vc.sendBuf
@@ -283,15 +281,21 @@ func (vc *VirtualConn) flush() {
 			segment = segment[:maxSegment]
 		}
 
-		// Build and send TCP packet
-		pkt := buildTCPPacket(vc.gwMAC, vc.clientMAC,
+		pkt := BuildTCPPacket(vc.gwMAC, vc.clientMAC,
 			[4]byte(vc.localAddr.IP.To4()), [4]byte(vc.remoteAddr.IP.To4()),
 			uint16(vc.localAddr.Port), uint16(vc.remoteAddr.Port),
-			vc.seq, vc.ack, 0x18, segment) // PSH+ACK
+			vc.seq, vc.ack, 0x18, segment)
 
-		_ = vc.w(pkt)
+		pkts = append(pkts, pkt)
 		vc.seq += uint32(len(segment))
 		vc.sendBuf = vc.sendBuf[len(segment):]
+	}
+	vc.sendMu.Unlock()
+	vc.mu.Unlock()
+
+	// Send outside all locks to avoid deadlocks in synchronous Pipe scenarios
+	for _, pkt := range pkts {
+		_ = vc.w(pkt)
 	}
 	vc.sendCond.Broadcast()
 }
@@ -311,8 +315,10 @@ func (vc *VirtualConn) handleInbound(ip []byte) error {
 	wnd := binary.BigEndian.Uint16(tcp[14:16])
 	payload := tcp[doff:]
 
+	var outgoing [][]byte
+	var signalRecv, signalClose bool
+
 	vc.mu.Lock()
-	defer vc.mu.Unlock()
 
 	vc.lastAct = time.Now()
 	vc.clientWnd = wnd
@@ -320,6 +326,7 @@ func (vc *VirtualConn) handleInbound(ip []byte) error {
 	// RST - tear down connection immediately
 	if (flags & 0x04) != 0 {
 		vc.closed.Store(true)
+		vc.mu.Unlock()
 		vc.recvCond.Broadcast()
 		vc.sendCond.Broadcast()
 		return nil
@@ -331,6 +338,7 @@ func (vc *VirtualConn) handleInbound(ip []byte) error {
 			vc.established = true
 			vc.seq += 1 // SYN consumed
 		}
+		vc.mu.Unlock()
 		return nil
 	}
 
@@ -339,23 +347,16 @@ func (vc *VirtualConn) handleInbound(ip []byte) error {
 		vc.recvMu.Lock()
 		vc.recvBuf = append(vc.recvBuf, payload...)
 		vc.recvMu.Unlock()
-		vc.recvCond.Broadcast()
+		signalRecv = true
 
 		vc.clientSeq += uint32(len(payload))
 		vc.ack = vc.clientSeq
 
-		// Send ACK
-		pkt := buildTCPPacket(vc.gwMAC, vc.clientMAC,
+		pkt := BuildTCPPacket(vc.gwMAC, vc.clientMAC,
 			[4]byte(vc.localAddr.IP.To4()), [4]byte(vc.remoteAddr.IP.To4()),
 			uint16(vc.localAddr.Port), uint16(vc.remoteAddr.Port),
-			vc.seq, vc.ack, 0x10, nil) // ACK
-		_ = vc.w(pkt)
-	}
-
-	// Handle ACK for our data
-	if (flags&0x10) != 0 && len(payload) == 0 {
-		// Client acknowledged our data
-		// Nothing special to do here
+			vc.seq, vc.ack, 0x10, nil)
+		outgoing = append(outgoing, pkt)
 	}
 
 	// Handle FIN
@@ -363,14 +364,26 @@ func (vc *VirtualConn) handleInbound(ip []byte) error {
 		vc.clientSeq += 1
 		vc.ack = vc.clientSeq
 		vc.closed.Store(true)
+		signalClose = true
 
-		// Send FIN+ACK
-		pkt := buildTCPPacket(vc.gwMAC, vc.clientMAC,
+		pkt := BuildTCPPacket(vc.gwMAC, vc.clientMAC,
 			[4]byte(vc.localAddr.IP.To4()), [4]byte(vc.remoteAddr.IP.To4()),
 			uint16(vc.localAddr.Port), uint16(vc.remoteAddr.Port),
-			vc.seq, vc.ack, 0x11, nil) // FIN+ACK
-		_ = vc.w(pkt)
+			vc.seq, vc.ack, 0x11, nil)
+		outgoing = append(outgoing, pkt)
+	}
 
+	vc.mu.Unlock()
+
+	// Send outside the lock to avoid deadlocks in synchronous Pipe scenarios
+	for _, pkt := range outgoing {
+		_ = vc.w(pkt)
+	}
+
+	if signalRecv {
+		vc.recvCond.Broadcast()
+	}
+	if signalClose {
 		vc.recvCond.Broadcast()
 		vc.sendCond.Broadcast()
 	}
@@ -392,7 +405,7 @@ func (vc *VirtualConn) Close() error {
 
 	// Send FIN using captured values
 	if shouldFin {
-		pkt := buildTCPPacket(vc.gwMAC, vc.clientMAC,
+		pkt := BuildTCPPacket(vc.gwMAC, vc.clientMAC,
 			[4]byte(vc.localAddr.IP.To4()), [4]byte(vc.remoteAddr.IP.To4()),
 			uint16(vc.localAddr.Port), uint16(vc.remoteAddr.Port),
 			seq, ack, 0x11, nil) // FIN+ACK

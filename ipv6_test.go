@@ -140,7 +140,7 @@ func TestIPv6Checksum(t *testing.T) {
 	}
 
 	// Calculate checksum
-	checksum := ipv6Checksum(src, dst, 6, uint32(len(data)), data)
+	checksum := IPv6Checksum(src, dst, 6, uint32(len(data)), data)
 
 	// Checksum should be non-zero
 	if checksum == 0 {

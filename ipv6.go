@@ -90,7 +90,7 @@ func (s *Stack) handleIPv6TCP(namespace uintptr, clientMAC, gwMAC [6]byte, packe
 			s.virtTCP6[k] = vc
 
 			// Send SYN-ACK
-			pkt := buildTCPPacket6(gwMAC, clientMAC, dstIP, srcIP, dstPort, srcPort, vc.seq, vc.ack, 0x12, nil)
+			pkt := BuildTCPPacket6(gwMAC, clientMAC, dstIP, srcIP, dstPort, srcPort, vc.seq, vc.ack, 0x12, nil)
 			s.mu.Unlock()
 			_ = w(pkt)
 
@@ -150,8 +150,8 @@ func (s *Stack) handleIPv6UDP(namespace uintptr, clientMAC, gwMAC [6]byte, packe
 	return u.handleOutbound(packet)
 }
 
-// ipv6Checksum calculates the pseudo-header checksum for IPv6 TCP/UDP
-func ipv6Checksum(src, dst [16]byte, protocol uint8, upperLayerPacketLength uint32, data []byte) uint16 {
+// IPv6Checksum calculates the pseudo-header checksum for IPv6 TCP/UDP.
+func IPv6Checksum(src, dst [16]byte, protocol uint8, upperLayerPacketLength uint32, data []byte) uint16 {
 	var sum uint32
 
 	// IPv6 pseudo-header:

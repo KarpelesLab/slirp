@@ -378,13 +378,13 @@ func createUDPPacket(srcIP, dstIP [4]byte, srcPort, dstPort uint16, payload []by
 	ip[9] = 17 // Protocol: UDP
 	copy(ip[12:16], srcIP[:])
 	copy(ip[16:20], dstIP[:])
-	binary.BigEndian.PutUint16(ip[10:12], ipChecksum(ip))
+	binary.BigEndian.PutUint16(ip[10:12], IPChecksum(ip))
 
 	udp := make([]byte, uh)
 	binary.BigEndian.PutUint16(udp[0:2], srcPort)
 	binary.BigEndian.PutUint16(udp[2:4], dstPort)
 	binary.BigEndian.PutUint16(udp[4:6], uint16(uh+len(payload)))
-	binary.BigEndian.PutUint16(udp[6:8], udpChecksum(ip[12:16], ip[16:20], udp, payload))
+	binary.BigEndian.PutUint16(udp[6:8], UDPChecksum(ip[12:16], ip[16:20], udp, payload))
 
 	pkt := make([]byte, len(ip)+len(udp)+len(payload))
 	copy(pkt, ip)

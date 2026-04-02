@@ -79,6 +79,10 @@ func (s *Stack) handleIPv6TCP(namespace uintptr, clientMAC, gwMAC [6]byte, packe
 	lk := listenerKey6{ip: dstIP, port: dstPort}
 	s.mu.Lock()
 	listener := s.listeners6[lk]
+	if listener == nil {
+		// Fallback: check wildcard listener (::)
+		listener = s.listeners6[listenerKey6{port: dstPort}]
+	}
 	if listener != nil && (flags&0x02) != 0 { // SYN to virtual listener
 		// Create virtual connection
 		k := key6{ns: namespace, srcIP: srcIP, srcPort: srcPort, dstIP: dstIP, dstPort: dstPort}
@@ -102,6 +106,11 @@ func (s *Stack) handleIPv6TCP(namespace uintptr, clientMAC, gwMAC [6]byte, packe
 			}
 			return nil
 		}
+		// Retransmitted SYN for existing connection — resend SYN-ACK
+		pkt := BuildTCPPacket6(gwMAC, clientMAC, dstIP, srcIP, dstPort, srcPort, vc.seq, vc.ack, 0x12, nil)
+		s.mu.Unlock()
+		_ = w(pkt)
+		return nil
 	}
 
 	// Check if this is for an existing virtual connection

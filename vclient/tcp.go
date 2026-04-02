@@ -70,9 +70,11 @@ type TCPConn struct {
 	retries  int
 
 	// Lifecycle
-	closed      atomic.Bool
-	established chan struct{} // closed when handshake completes
-	finRecvd    chan struct{} // closed when FIN received from remote
+	closed          atomic.Bool
+	established     chan struct{} // closed when handshake completes
+	establishedOnce sync.Once
+	finRecvd        chan struct{} // closed when FIN received from remote
+	finRecvdOnce    sync.Once
 
 	// Deadlines
 	readDeadline  atomic.Value // time.Time
@@ -168,7 +170,7 @@ func (tc *TCPConn) handleSegment(ip []byte, ihl int) {
 	payload := tcp[doff:]
 
 	// Signals to fire after releasing the lock
-	var signalEstablished, signalFinRecvd, signalRecv, signalSend bool
+	var signalEstablished, signalFinRecvd, signalRecv, signalSend, needUnregister bool
 
 	tc.mu.Lock()
 
@@ -178,6 +180,7 @@ func (tc *TCPConn) handleSegment(ip []byte, ihl int) {
 		tc.closed.Store(true)
 		tc.stopRTO()
 		tc.mu.Unlock()
+		tc.unregister()
 		tc.recvCond.Broadcast()
 		tc.sendCond.Broadcast()
 		tc.safeCloseEstablished()
@@ -265,6 +268,7 @@ func (tc *TCPConn) handleSegment(ip []byte, ihl int) {
 			tc.stopRTO()
 			signalRecv = true
 			signalSend = true
+			needUnregister = true
 		}
 	}
 
@@ -275,6 +279,9 @@ func (tc *TCPConn) handleSegment(ip []byte, ihl int) {
 	// All sends happen outside the lock
 	tc.flushPackets(pkts)
 
+	if needUnregister {
+		tc.unregister()
+	}
 	// Signal condition variables
 	if signalRecv {
 		tc.recvCond.Broadcast()
@@ -476,6 +483,7 @@ func (tc *TCPConn) onRTOTimeout() {
 		tc.closed.Store(true)
 		tc.stopRTO()
 		tc.mu.Unlock()
+		tc.unregister()
 		tc.recvCond.Broadcast()
 		tc.sendCond.Broadcast()
 		tc.safeCloseEstablished()
@@ -547,23 +555,16 @@ func (tc *TCPConn) timeWait() {
 	tc.state = tcpClosed
 	tc.closed.Store(true)
 	tc.mu.Unlock()
+	tc.unregister()
 	tc.recvCond.Broadcast()
 }
 
 func (tc *TCPConn) safeCloseEstablished() {
-	select {
-	case <-tc.established:
-	default:
-		close(tc.established)
-	}
+	tc.establishedOnce.Do(func() { close(tc.established) })
 }
 
 func (tc *TCPConn) safeCloseFinRecvd() {
-	select {
-	case <-tc.finRecvd:
-	default:
-		close(tc.finRecvd)
-	}
+	tc.finRecvdOnce.Do(func() { close(tc.finRecvd) })
 }
 
 func (tc *TCPConn) abort() {
@@ -572,6 +573,7 @@ func (tc *TCPConn) abort() {
 	tc.state = tcpClosed
 	tc.stopRTO()
 	tc.mu.Unlock()
+	// Note: callers (Client.Close, dialTCP) handle map removal themselves.
 	tc.recvCond.Broadcast()
 	tc.sendCond.Broadcast()
 	tc.safeCloseEstablished()
@@ -648,10 +650,24 @@ func (tc *TCPConn) Close() error {
 		tc.state = tcpClosed
 		tc.stopRTO()
 	}
+	isClosed := tc.state == tcpClosed
 	tc.mu.Unlock()
 
 	tc.flushPackets(pkts)
 
+	// Only remove from connection map when fully closed; active FIN
+	// handshakes still need to receive ACKs/FINs from the remote.
+	if isClosed {
+		tc.unregister()
+	}
+
+	tc.recvCond.Broadcast()
+	tc.sendCond.Broadcast()
+	return nil
+}
+
+// unregister removes this connection from the client's dispatch map.
+func (tc *TCPConn) unregister() {
 	tc.c.tcpMu.Lock()
 	delete(tc.c.tcpConns, connKey{
 		localPort:  tc.localPort,
@@ -659,10 +675,6 @@ func (tc *TCPConn) Close() error {
 		remotePort: tc.remotePort,
 	})
 	tc.c.tcpMu.Unlock()
-
-	tc.recvCond.Broadcast()
-	tc.sendCond.Broadcast()
-	return nil
 }
 
 func (tc *TCPConn) LocalAddr() net.Addr {

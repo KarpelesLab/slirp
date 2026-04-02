@@ -327,8 +327,12 @@ func (vc *VirtualConn) handleInbound(ip []byte) error {
 	if (flags & 0x04) != 0 {
 		vc.closed.Store(true)
 		vc.mu.Unlock()
+		vc.recvMu.Lock()
 		vc.recvCond.Broadcast()
+		vc.recvMu.Unlock()
+		vc.sendMu.Lock()
 		vc.sendCond.Broadcast()
+		vc.sendMu.Unlock()
 		return nil
 	}
 
@@ -380,12 +384,15 @@ func (vc *VirtualConn) handleInbound(ip []byte) error {
 		_ = vc.w(pkt)
 	}
 
-	if signalRecv {
+	if signalRecv || signalClose {
+		vc.recvMu.Lock()
 		vc.recvCond.Broadcast()
+		vc.recvMu.Unlock()
 	}
 	if signalClose {
-		vc.recvCond.Broadcast()
+		vc.sendMu.Lock()
 		vc.sendCond.Broadcast()
+		vc.sendMu.Unlock()
 	}
 
 	return nil
@@ -412,8 +419,14 @@ func (vc *VirtualConn) Close() error {
 		_ = vc.w(pkt)
 	}
 
+	// Broadcast under the respective locks to prevent missed wakeups
+	vc.recvMu.Lock()
 	vc.recvCond.Broadcast()
+	vc.recvMu.Unlock()
+
+	vc.sendMu.Lock()
 	vc.sendCond.Broadcast()
+	vc.sendMu.Unlock()
 	return nil
 }
 

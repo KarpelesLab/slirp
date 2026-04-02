@@ -99,15 +99,23 @@ func (s *Stack) Close() error {
 	// Close all virtual TCP connections
 	for k, vc := range s.virtTCP {
 		vc.closed.Store(true)
+		vc.recvMu.Lock()
 		vc.recvCond.Broadcast()
+		vc.recvMu.Unlock()
+		vc.sendMu.Lock()
 		vc.sendCond.Broadcast()
+		vc.sendMu.Unlock()
 		delete(s.virtTCP, k)
 	}
 	// Close all virtual TCP6 connections
 	for k, vc := range s.virtTCP6 {
 		vc.closed.Store(true)
+		vc.recvMu.Lock()
 		vc.recvCond.Broadcast()
+		vc.recvMu.Unlock()
+		vc.sendMu.Lock()
 		vc.sendCond.Broadcast()
+		vc.sendMu.Unlock()
 		delete(s.virtTCP6, k)
 	}
 	// Close all listeners
@@ -177,6 +185,10 @@ func (s *Stack) handleIPv4(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, 
 		lk := listenerKey{ip: dstIP, port: dstPort}
 		s.mu.Lock()
 		listener := s.listeners[lk]
+		if listener == nil {
+			// Fallback: check wildcard listener (0.0.0.0)
+			listener = s.listeners[listenerKey{port: dstPort}]
+		}
 		if listener != nil && (flags&0x02) != 0 { // SYN to virtual listener
 			// Create virtual connection
 			k := key{ns: namespace, srcIP: srcIP, srcPort: srcPort, dstIP: dstIP, dstPort: dstPort}
@@ -200,6 +212,11 @@ func (s *Stack) handleIPv4(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, 
 				}
 				return nil
 			}
+			// Retransmitted SYN for existing connection — resend SYN-ACK
+			pkt := BuildTCPPacket(gwMAC, clientMAC, dstIP, srcIP, dstPort, srcPort, vc.seq, vc.ack, 0x12, nil)
+			s.mu.Unlock()
+			_ = w(pkt)
+			return nil
 		}
 
 		// Check if this is for an existing virtual connection
@@ -325,8 +342,12 @@ func (s *Stack) maintenance() {
 			}
 			vc.mu.Unlock()
 			if idle > 2*time.Minute || closed {
+				vc.recvMu.Lock()
 				vc.recvCond.Broadcast()
+				vc.recvMu.Unlock()
+				vc.sendMu.Lock()
 				vc.sendCond.Broadcast()
+				vc.sendMu.Unlock()
 			}
 		}
 		// Virtual TCP6 cleanup
@@ -340,8 +361,12 @@ func (s *Stack) maintenance() {
 			}
 			vc.mu.Unlock()
 			if idle > 2*time.Minute || closed {
+				vc.recvMu.Lock()
 				vc.recvCond.Broadcast()
+				vc.recvMu.Unlock()
+				vc.sendMu.Lock()
 				vc.sendCond.Broadcast()
+				vc.sendMu.Unlock()
 			}
 		}
 		s.mu.Unlock()

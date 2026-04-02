@@ -2,6 +2,7 @@ package slirp
 
 import (
 	"encoding/binary"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -148,21 +149,22 @@ func (t *tcpConn) handleOutbound(ip []byte) error {
 			pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x10, nil)
 			_ = t.w(pkt)
 			t.cond.Broadcast()
-		}
-		// Check for piggy-backed FIN
-		if (flags & 0x01) != 0 {
-			t.cSeq += 1
-			if t.conn != nil {
-				_ = t.conn.Close()
+
+			// Check for piggy-backed FIN (only if data was in-sequence)
+			if (flags & 0x01) != 0 {
+				t.cSeq += 1
+				if t.conn != nil {
+					_ = t.conn.Close()
+				}
+				pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
+				_ = t.w(pkt)
+				t.closed = true
 			}
-			pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
-			_ = t.w(pkt)
-			t.closed = true
 		}
 		return nil
 	}
 
-	// Pure ACKs: advance unacked and flush queued data
+	// Pure ACKs (possibly with FIN): advance unacked and flush queued data
 	if (flags&0x10) != 0 && len(payload) == 0 {
 		if SeqAfter(ack, t.sAck) {
 			adv := ack - t.sAck
@@ -179,10 +181,9 @@ func (t *tcpConn) handleOutbound(ip []byte) error {
 				t.finPending = false
 			}
 		}
-		return nil
 	}
 
-	// FIN
+	// FIN (may accompany a pure ACK or arrive standalone)
 	if (flags & 0x01) != 0 {
 		t.cSeq += 1
 		if t.conn != nil {
@@ -203,7 +204,7 @@ func (t *tcpConn) readFromRemote() {
 	for {
 		n, err := t.conn.Read(buf)
 		if err != nil {
-			if err != io.EOF {
+			if !errors.Is(err, io.EOF) {
 				log.Printf("usernat tcp read: %v", err)
 			}
 			t.mu.Lock()
@@ -220,8 +221,12 @@ func (t *tcpConn) readFromRemote() {
 		if n > 0 {
 			t.mu.Lock()
 			const maxBuf = 1 << 20
-			for len(t.sendQ) >= maxBuf {
+			for len(t.sendQ) >= maxBuf && !t.closed {
 				t.cond.Wait()
+			}
+			if t.closed {
+				t.mu.Unlock()
+				return
 			}
 			t.sendQ = append(t.sendQ, buf[:n]...)
 			t.flushSendQ()

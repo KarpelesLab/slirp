@@ -46,35 +46,46 @@ func (c *Client) LookupHost(ctx context.Context, host string) ([]string, error) 
 		return nil, err
 	}
 
-	// Wait for response with timeout
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	buf := make([]byte, 512)
+	// Read responses in a goroutine so we can respect context/timeout
+	type dnsResult struct {
+		addrs []string
+		err   error
+	}
+	resultCh := make(chan dnsResult, 1)
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			n, err := conn.Read(buf)
+			if err != nil {
+				resultCh <- dnsResult{err: err}
+				return
+			}
+			ips, err := parseDNSResponse(buf[:n], id)
+			if err != nil {
+				continue // wrong ID or parse error, keep waiting
+			}
+			if len(ips) == 0 {
+				resultCh <- dnsResult{err: errors.New("no addresses found for " + host)}
+				return
+			}
+			result := make([]string, len(ips))
+			for i, ip := range ips {
+				result[i] = ip.String()
+			}
+			resultCh <- dnsResult{addrs: result}
+			return
+		}
+	}()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-
-		n, err := conn.Read(buf)
-		if err != nil {
-			return nil, err
-		}
-
-		ips, err := parseDNSResponse(buf[:n], id)
-		if err != nil {
-			continue // wrong ID or parse error, keep waiting
-		}
-		if len(ips) == 0 {
-			return nil, errors.New("no addresses found for " + host)
-		}
-
-		result := make([]string, len(ips))
-		for i, ip := range ips {
-			result[i] = ip.String()
-		}
-		return result, nil
+	select {
+	case res := <-resultCh:
+		return res.addrs, res.err
+	case <-ctx.Done():
+		conn.Close() // unblock the Read goroutine
+		return nil, ctx.Err()
+	case <-time.After(5 * time.Second):
+		conn.Close() // unblock the Read goroutine
+		return nil, errors.New("DNS resolution timeout")
 	}
 }
 

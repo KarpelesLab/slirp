@@ -10,13 +10,10 @@ import (
 
 func TestNewUDPConn(t *testing.T) {
 	srcIP := [4]byte{192, 168, 1, 1}
-	dstIP := [4]byte{8, 8, 8, 8}
+	dstIP := [4]byte{127, 0, 0, 1}
 	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
 	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
 	writer := func(b []byte) error { return nil }
-
-	// Use a valid destination (localhost)
-	dstIP = [4]byte{127, 0, 0, 1}
 
 	conn, err := newUDPConn(srcIP, 12345, dstIP, 9999, clientMAC, gwMAC, writer)
 	if err != nil {

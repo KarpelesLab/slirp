@@ -96,8 +96,9 @@ func (vc *VirtualConn6) Write(b []byte) (int, error) {
 	vc.sendBuf = append(vc.sendBuf, b...)
 	vc.sendMu.Unlock()
 
-	// Trigger sending
-	go vc.flush()
+	// Flush synchronously — all locks are released before sending packets,
+	// so this is safe even in synchronous Pipe scenarios.
+	vc.flush()
 
 	return len(b), nil
 }

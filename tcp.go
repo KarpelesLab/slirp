@@ -155,13 +155,18 @@ func (t *tcpConn) handleOutbound(ip []byte) error {
 			// Check for piggy-backed FIN (only if data was in-sequence)
 			if (flags & 0x01) != 0 {
 				t.cSeq += 1
-				if t.conn != nil {
-					_ = t.conn.Close()
+				// Half-close: client is done sending, but server may still respond
+				if tc, ok := t.conn.(*net.TCPConn); ok {
+					_ = tc.CloseWrite()
 				}
-				pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
+				// ACK the FIN; our own FIN is sent later when readFromRemote gets EOF
+				pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x10, nil)
 				_ = t.w(pkt)
-				t.closed = true
 			}
+		} else {
+			// Out-of-order or retransmit: send duplicate ACK to help sender
+			pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x10, nil)
+			_ = t.w(pkt)
 		}
 		return nil
 	}
@@ -188,13 +193,15 @@ func (t *tcpConn) handleOutbound(ip []byte) error {
 	// FIN (may accompany a pure ACK or arrive standalone)
 	if (flags & 0x01) != 0 {
 		t.cSeq += 1
+		// Half-close: client is done sending, but server may still respond
 		if t.conn != nil {
-			_ = t.conn.Close()
+			if tc, ok := t.conn.(*net.TCPConn); ok {
+				_ = tc.CloseWrite()
+			}
 		}
-		// send FIN-ACK
-		pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
+		// ACK the FIN; our own FIN is sent later when readFromRemote gets EOF
+		pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x10, nil)
 		_ = t.w(pkt)
-		t.closed = true
 		return nil
 	}
 

@@ -132,6 +132,9 @@ type Conn struct {
 	persistTimer   *time.Timer
 	persistBackoff time.Duration
 
+	// TIME-WAIT timer (RFC 9293 §3.10.7.4 — restarted on each segment)
+	timeWaitTimer *time.Timer
+
 	// Keepalive
 	keepalive      bool
 	keepaliveIdle  time.Duration
@@ -259,6 +262,11 @@ func (c *Conn) flushPackets(pkts [][]byte) {
 func (c *Conn) rcvWindow() uint16 {
 	// Advertise available receive buffer space, scaled by our shift factor.
 	// Uses RecvBuf.Window() which correctly accounts for OOO data.
+	//
+	// Receiver SWS avoidance (RFC 9293 §3.8.6.2.2, Clark's algorithm):
+	// Do not advance the right edge of the window by less than
+	// min(MSS, RecvBufSize/2). If the available space is smaller than
+	// that threshold, advertise zero to avoid silly-window syndrome.
 	c.recvMu.Lock()
 	var avail int
 	if c.recvBuf != nil {
@@ -267,6 +275,15 @@ func (c *Conn) rcvWindow() uint16 {
 		avail = c.recvBufSize()
 	}
 	c.recvMu.Unlock()
+
+	// SWS avoidance: suppress small window advertisements
+	swsThresh := c.mss
+	if half := c.recvBufSize() / 2; half < swsThresh {
+		swsThresh = half
+	}
+	if avail < swsThresh {
+		avail = 0
+	}
 
 	if c.wscaleOK {
 		avail >>= c.rcvWndShift
@@ -437,13 +454,24 @@ func (c *Conn) addOptions(seg *Segment) {
 	}
 }
 
-// updateTimestamp extracts and stores the remote's timestamp from incoming options.
-func (c *Conn) updateTimestamp(opts []Option) {
-	if c.tsOK {
-		if tsVal, _, ok := GetTimestamp(opts); ok {
-			c.tsRecent = tsVal
-		}
+// updateTimestamp extracts the remote's timestamp from incoming options and
+// performs PAWS validation (RFC 7323 §5). Returns false if the segment
+// should be dropped due to timestamp regression (old duplicate).
+func (c *Conn) updateTimestamp(opts []Option) bool {
+	if !c.tsOK {
+		return true // timestamps not negotiated, accept all
 	}
+	tsVal, _, ok := GetTimestamp(opts)
+	if !ok {
+		return true // no timestamp option in segment, accept
+	}
+	// PAWS: reject segments with TSval older than tsRecent.
+	// Use signed comparison for wrapping: int32(tsVal - tsRecent) < 0 means regression.
+	if c.tsRecent != 0 && int32(tsVal-c.tsRecent) < 0 {
+		return false // old duplicate — drop
+	}
+	c.tsRecent = tsVal
+	return true
 }
 
 // --- Segment validation (RFC 9293 §3.10.7.4) ---
@@ -649,6 +677,8 @@ func (c *Conn) handleSynchronized(seg Segment) [][]byte {
 	case StateLastAck:
 		return c.handleLastAck(seg)
 	case StateTimeWait:
+		// Restart 2MSL timer per RFC 9293 §3.10.7.4
+		c.restartTimeWait()
 		c.queueACK()
 		return c.drainOutgoing()
 	}
@@ -779,12 +809,10 @@ func (c *Conn) handleSynReceived(seg Segment) [][]byte {
 
 	c.safeCloseEstablished()
 
-	// Process any data in this ACK segment
-	if len(seg.Payload) > 0 {
-		c.processData(seg)
-	}
-
-	return c.drainOutgoing()
+	// Process any data or FIN in this segment via the common data handler.
+	// This ensures a SYN+ACK+FIN segment (or data in the ACK) is handled
+	// correctly per RFC 9293 §3.10.7.4 steps 7-8.
+	return c.handleDataState(seg)
 }
 
 func (c *Conn) handleEstablished(seg Segment) [][]byte {
@@ -794,8 +822,13 @@ func (c *Conn) handleEstablished(seg Segment) [][]byte {
 func (c *Conn) handleDataState(seg Segment) [][]byte {
 	needACK := false
 
-	// Update remote's timestamp for RTTM (RFC 7323)
-	c.updateTimestamp(seg.Options)
+	// PAWS validation and timestamp update (RFC 7323 §5)
+	if !c.updateTimestamp(seg.Options) {
+		// Timestamp regression — old duplicate segment, drop it.
+		// Still send an ACK so the peer knows our state.
+		c.queueACK()
+		return c.drainOutgoing()
+	}
 
 	// Process ACK
 	if seg.HasFlag(FlagACK) {
@@ -872,9 +905,11 @@ func (c *Conn) handleFinWait2(seg Segment) [][]byte {
 }
 
 func (c *Conn) handleCloseWait(seg Segment) [][]byte {
-	// Only process ACKs (for data we're still sending)
+	// Process ACKs for data we're still sending, and update send window
+	// so outbound data isn't stalled by a stale window value.
 	if seg.HasFlag(FlagACK) {
 		c.processACK(seg.Ack, seg.Options)
+		c.sndWnd = uint32(seg.Window) << c.sndWndShift
 	}
 	return c.drainOutgoing()
 }
@@ -942,7 +977,9 @@ func (c *Conn) processACK(ack uint32, opts []Option) {
 		return
 	}
 	if SeqAfter(ack, c.sendBuf.NXT()) {
-		return // ACK beyond what we've sent
+		// ACK beyond what we've sent — send ACK and drop (RFC 9293 §3.10.7.4 step 5)
+		c.queueACK()
+		return
 	}
 
 	acked := c.sendBuf.Acknowledge(ack)
@@ -1003,6 +1040,9 @@ func (c *Conn) retransmit() {
 }
 
 // flushSendQueue sends queued data respecting both remote window and cwnd.
+// Sender-side SWS avoidance (RFC 9293 §3.8.6.2.1): only send if we can
+// fill a full MSS, or all prior data is acknowledged (Nagle-like condition),
+// or the available window is at least half of the maximum observed window.
 func (c *Conn) flushSendQueue() {
 	for c.sendBuf.Pending() > 0 {
 		// Effective window = min(sndWnd, cwnd) - unacked
@@ -1015,7 +1055,15 @@ func (c *Conn) flushSendQueue() {
 			break
 		}
 
-		n := min(avail, c.mss, c.sendBuf.Pending())
+		pending := c.sendBuf.Pending()
+		n := min(avail, c.mss, pending)
+
+		// Sender SWS avoidance: don't send tiny segments unless
+		// (a) we can fill a full MSS, or (b) no unacked data (Nagle-like)
+		if n < c.mss && c.sendBuf.Unacked() > 0 {
+			break
+		}
+
 		data := c.sendBuf.PeekUnsent(n)
 		if len(data) == 0 {
 			break
@@ -1209,16 +1257,25 @@ func (c *Conn) onRTOTimeout() {
 }
 
 func (c *Conn) startTimeWait() {
-	time.AfterFunc(TimeWaitDuration, func() {
-		c.mu.Lock()
-		c.state = StateClosed
-		c.closed.Store(true)
-		c.stopKeepalive()
-		c.stopPersist()
-		c.mu.Unlock()
-		c.recvCond.Broadcast()
-		c.sendCond.Broadcast()
-	})
+	c.stopKeepalive()
+	c.stopPersist()
+	c.timeWaitTimer = time.AfterFunc(TimeWaitDuration, c.onTimeWaitExpired)
+}
+
+func (c *Conn) restartTimeWait() {
+	if c.timeWaitTimer != nil {
+		c.timeWaitTimer.Reset(TimeWaitDuration)
+	}
+}
+
+func (c *Conn) onTimeWaitExpired() {
+	c.mu.Lock()
+	c.state = StateClosed
+	c.closed.Store(true)
+	c.timeWaitTimer = nil
+	c.mu.Unlock()
+	c.recvCond.Broadcast()
+	c.sendCond.Broadcast()
 }
 
 // --- Keepalive ---
@@ -1375,12 +1432,22 @@ func (c *Conn) Close() error {
 		c.queueFIN()
 		c.startRTO()
 		pkts = c.drainOutgoing()
-	case StateSynSent, StateSynReceived:
+	case StateSynSent:
 		c.state = StateClosed
 		c.closed.Store(true)
 		c.stopRTO()
 		c.stopKeepalive()
 		c.stopPersist()
+	case StateSynReceived:
+		// RFC 9293 §3.10.4: send FIN, enter FIN-WAIT-1
+		c.state = StateFinWait1
+		c.queueFIN()
+		c.startRTO()
+		pkts = c.drainOutgoing()
+	case StateFinWait1, StateFinWait2:
+		// Already closing — return error per RFC 9293 §3.10.4
+		c.mu.Unlock()
+		return errors.New("connection closing")
 	default:
 		c.closed.Store(true)
 		c.state = StateClosed

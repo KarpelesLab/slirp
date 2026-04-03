@@ -88,7 +88,7 @@ const (
 
 	TimeWaitDuration = 2 * time.Second // shortened for virtual environments
 
-	DefaultKeepaliveIdle     = 30 * time.Second
+	DefaultKeepaliveIdle     = 300 * time.Second
 	DefaultKeepaliveInterval = 15 * time.Second
 	DefaultKeepaliveCount    = 3
 )

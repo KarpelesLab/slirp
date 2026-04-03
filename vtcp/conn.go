@@ -1381,6 +1381,18 @@ func (c *Conn) LocalAddr() net.Addr    { return c.localAddr }
 func (c *Conn) RemoteAddr() net.Addr   { return c.remoteAddr }
 func (c *Conn) Writer() SegmentWriter { return c.writer }
 
+// SetupForHandshake puts the connection into SYN-SENT state with the given ISN,
+// allowing HandleSegment to process a SYN-ACK. This is used for manual handshake
+// in tests where Connect() can't be used (synchronous delivery).
+func (c *Conn) SetupForHandshake(iss uint32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sendBuf = NewSendBuf(c.recvBufSize(), iss)
+	c.recvBuf = NewRecvBuf(0, c.recvBufCap)
+	c.state = StateSynSent
+	c.sendBuf.AdvanceSent(1) // SYN consumes 1 seq
+}
+
 func (c *Conn) SetDeadline(t time.Time) error {
 	c.readDeadline.Store(t)
 	c.writeDeadline.Store(t)

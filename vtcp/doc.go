@@ -100,6 +100,9 @@ const (
 // The checksum field in the segment is left at zero.
 type SegmentWriter func(seg []byte) error
 
+// RandUint32Exported returns a cryptographically random uint32.
+func RandUint32Exported() uint32 { return randUint32() }
+
 // randUint32 returns a cryptographically random uint32.
 func randUint32() uint32 {
 	var b [4]byte

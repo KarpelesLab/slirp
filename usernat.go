@@ -32,6 +32,8 @@ type Stack struct {
 	listeners6 map[listenerKey6]*Listener6
 	virtTCP    map[key]*vtcp.Conn
 	virtTCP6   map[key6]*vtcp.Conn
+	pending    map[key]struct{}
+	pending6   map[key6]struct{}
 	done       chan struct{}
 	closeOnce  sync.Once
 }
@@ -46,6 +48,8 @@ func New() *Stack {
 		listeners6: make(map[listenerKey6]*Listener6),
 		virtTCP:    make(map[key]*vtcp.Conn),
 		virtTCP6:   make(map[key6]*vtcp.Conn),
+		pending:    make(map[key]struct{}),
+		pending6:   make(map[key6]struct{}),
 		done:       make(chan struct{}),
 	}
 	go s.maintenance()
@@ -202,6 +206,11 @@ func (s *Stack) handleIPv4(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, 
 				select {
 				case listener.acceptCh <- vc:
 				default:
+					// Accept queue full — clean up
+					vc.Abort()
+					s.mu.Lock()
+					delete(s.virtTCP, k)
+					s.mu.Unlock()
 				}
 				return nil
 			}
@@ -252,12 +261,25 @@ func (s *Stack) handleIPv4(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, 
 			return nil
 		}
 
-		// Non-SYN to non-existent connection → RST
+		// Non-SYN to non-existent connection → RST (RFC 9293 §3.10.7.1)
 		if (flags & 0x02) == 0 {
 			s.mu.Unlock()
-			seq := binary.BigEndian.Uint32(tcp[4:8])
-			pkt := buildFrame4(gwMAC, clientMAC, dstIP, srcIP,
-				(&vtcp.Segment{SrcPort: dstPort, DstPort: srcPort, Ack: seq + 1, Flags: vtcp.FlagRST | vtcp.FlagACK, Window: 0}).Marshal())
+			var rstSeg *vtcp.Segment
+			if (flags & 0x10) != 0 {
+				// Incoming has ACK: send RST with SEQ=SEG.ACK (no ACK flag)
+				segACK := binary.BigEndian.Uint32(tcp[8:12])
+				rstSeg = &vtcp.Segment{SrcPort: dstPort, DstPort: srcPort, Seq: segACK, Flags: vtcp.FlagRST}
+			} else {
+				// No ACK: send RST+ACK with SEQ=0, ACK=SEG.SEQ+SEG.LEN
+				segSEQ := binary.BigEndian.Uint32(tcp[4:8])
+				dataOff := int(tcp[12]>>4) * 4
+				dataLen := uint32(len(tcp) - dataOff)
+				if (tcp[13] & 0x01) != 0 { // FIN flag
+					dataLen++
+				}
+				rstSeg = &vtcp.Segment{SrcPort: dstPort, DstPort: srcPort, Seq: 0, Ack: segSEQ + dataLen, Flags: vtcp.FlagRST | vtcp.FlagACK}
+			}
+			pkt := buildFrame4(gwMAC, clientMAC, dstIP, srcIP, rstSeg.Marshal())
 			_ = w(pkt)
 			return nil
 		}
@@ -268,16 +290,32 @@ func (s *Stack) handleIPv4(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, 
 			s.mu.Unlock()
 			return err
 		}
+		// Check if a dial is already in progress for this key
+		if _, dup := s.pending[k]; dup {
+			s.mu.Unlock()
+			return nil
+		}
+		s.pending[k] = struct{}{}
 		s.mu.Unlock()
 
 		// Dial remote outside any lock
 		remoteAddr := net.IP(dstIP[:]).String() + ":" + itoaU16(dstPort)
 		remote, err := net.Dial("tcp", remoteAddr)
+
+		s.mu.Lock()
+		delete(s.pending, k)
 		if err != nil {
+			s.mu.Unlock()
 			// Send RST to client
 			rst := buildFrame4(gwMAC, clientMAC, dstIP, srcIP,
 				(&vtcp.Segment{SrcPort: dstPort, DstPort: srcPort, Ack: seg.Seq + 1, Flags: vtcp.FlagRST | vtcp.FlagACK}).Marshal())
 			_ = w(rst)
+			return nil
+		}
+		// Another goroutine may have created the connection while we were dialing
+		if s.tcp[k] != nil {
+			s.mu.Unlock()
+			_ = remote.Close()
 			return nil
 		}
 
@@ -297,7 +335,6 @@ func (s *Stack) handleIPv4(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, 
 		synAckPkts := natVC.AcceptSYN(seg)
 		nc := &tcpNATConn{vc: natVC, remote: remote}
 
-		s.mu.Lock()
 		s.tcp[k] = nc
 		s.mu.Unlock()
 
@@ -347,18 +384,17 @@ func (s *Stack) maintenance() {
 		}
 		now := time.Now()
 		s.mu.Lock()
-		// TCP cleanup
+		// TCP cleanup: only remove StateClosed; TIME_WAIT connections stay
+		// until vtcp's own timer transitions them to Closed.
 		for k, c := range s.tcp {
-			st := c.vc.State()
-			if st == vtcp.StateClosed || st == vtcp.StateTimeWait || c.closed {
+			if c.vc.State() == vtcp.StateClosed {
 				c.close()
 				delete(s.tcp, k)
 			}
 		}
 		// TCP6 cleanup
 		for k, c := range s.tcp6 {
-			st := c.vc.State()
-			if st == vtcp.StateClosed || st == vtcp.StateTimeWait || c.closed {
+			if c.vc.State() == vtcp.StateClosed {
 				c.close()
 				delete(s.tcp6, k)
 			}
@@ -389,15 +425,13 @@ func (s *Stack) maintenance() {
 		}
 		// Virtual TCP cleanup
 		for k, vc := range s.virtTCP {
-			st := vc.State()
-			if st == vtcp.StateClosed || st == vtcp.StateTimeWait {
+			if vc.State() == vtcp.StateClosed {
 				delete(s.virtTCP, k)
 			}
 		}
 		// Virtual TCP6 cleanup
 		for k, vc := range s.virtTCP6 {
-			st := vc.State()
-			if st == vtcp.StateClosed || st == vtcp.StateTimeWait {
+			if vc.State() == vtcp.StateClosed {
 				delete(s.virtTCP6, k)
 			}
 		}

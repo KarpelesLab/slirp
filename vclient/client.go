@@ -161,15 +161,56 @@ func (c *Client) handleIPv4(ip []byte) error {
 	return nil
 }
 
-// allocPort returns the next ephemeral port.
+// allocPort returns the next ephemeral port, skipping ports already in use.
 func (c *Client) allocPort() uint16 {
+	const minPort = 49152
+	const maxPort = 65535
+	const portRange = maxPort - minPort + 1
+
+	for i := 0; i < portRange; i++ {
+		c.portMu.Lock()
+		p := c.nextPort
+		c.nextPort++
+		if c.nextPort == 0 || c.nextPort < minPort {
+			c.nextPort = minPort
+		}
+		c.portMu.Unlock()
+
+		// Check if port is in use in TCP connections
+		inUse := false
+		c.tcpMu.Lock()
+		for k := range c.tcpConns {
+			if k.localPort == p {
+				inUse = true
+				break
+			}
+		}
+		c.tcpMu.Unlock()
+
+		if !inUse {
+			c.udpMu.Lock()
+			for k := range c.udpConns {
+				if k.localPort == p {
+					inUse = true
+					break
+				}
+			}
+			c.udpMu.Unlock()
+		}
+
+		if !inUse {
+			return p
+		}
+	}
+
+	// All ports exhausted; return the next candidate anyway as a fallback.
 	c.portMu.Lock()
-	defer c.portMu.Unlock()
 	p := c.nextPort
 	c.nextPort++
-	if c.nextPort == 0 {
-		c.nextPort = 49152
+	if c.nextPort == 0 || c.nextPort < minPort {
+		c.nextPort = minPort
 	}
+	c.portMu.Unlock()
 	return p
 }
 
@@ -232,7 +273,10 @@ func (c *Client) Close() error {
 	c.udpMu.Lock()
 	for k, conn := range c.udpConns {
 		conn.closed.Store(true)
+		conn.recvMu.Lock()
+		conn.closedForRead = true
 		conn.recvCond.Broadcast()
+		conn.recvMu.Unlock()
 		delete(c.udpConns, k)
 	}
 	c.udpMu.Unlock()

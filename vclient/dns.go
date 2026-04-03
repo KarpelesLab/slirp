@@ -77,13 +77,16 @@ func (c *Client) LookupHost(ctx context.Context, host string) ([]string, error) 
 		}
 	}()
 
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+
 	select {
 	case res := <-resultCh:
 		return res.addrs, res.err
 	case <-ctx.Done():
 		conn.Close() // unblock the Read goroutine
 		return nil, ctx.Err()
-	case <-time.After(5 * time.Second):
+	case <-timeout.C:
 		conn.Close() // unblock the Read goroutine
 		return nil, errors.New("DNS resolution timeout")
 	}

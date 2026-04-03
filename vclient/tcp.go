@@ -68,10 +68,10 @@ func (c *Client) handleTCP(ip []byte, ihl int) error {
 		return nil
 	}
 
-	// No existing connection — check for SYN to a listener
+	// No existing connection — check for pure SYN to a listener
 	flags := tcp[13]
-	if (flags & vtcp.FlagSYN) == 0 {
-		return nil // not a SYN, drop
+	if flags&(vtcp.FlagSYN|vtcp.FlagACK) != vtcp.FlagSYN {
+		return nil // not a pure SYN (reject SYN+ACK and non-SYN), drop
 	}
 
 	c.listenerMu.Lock()
@@ -119,7 +119,11 @@ func (c *Client) handleTCP(ip []byte, ihl int) error {
 	select {
 	case l.acceptCh <- tc:
 	default:
-		// Accept queue full, drop
+		// Accept queue full — abort the connection and remove from map
+		tc.vc.Abort()
+		c.tcpMu.Lock()
+		delete(c.tcpConns, k)
+		c.tcpMu.Unlock()
 	}
 
 	return nil

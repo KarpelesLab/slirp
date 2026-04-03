@@ -12,23 +12,28 @@ type CongestionController interface {
 	// OnTimeout is called on RTO timeout (loss detected via timeout).
 	OnTimeout()
 	// OnFastRetransmit is called when entering fast retransmit/recovery.
-	OnFastRetransmit(flightSize uint32)
+	// sndNxt is the current SND.NXT, used as the recovery point.
+	OnFastRetransmit(flightSize uint32, sndNxt uint32)
 	// ExitRecovery is called when recovery is complete (all data acked past recovery point).
 	ExitRecovery()
 	// SendWindow returns the current congestion window in bytes.
 	SendWindow() uint32
 	// InRecovery reports whether the sender is in fast recovery.
 	InRecovery() bool
+	// RecoverySeq returns the sequence number that must be fully acknowledged
+	// to exit fast recovery (SND.NXT at the time recovery was entered).
+	RecoverySeq() uint32
 }
 
 // NewReno implements RFC 5681 TCP congestion control:
 // slow start, congestion avoidance, fast retransmit, fast recovery.
 type NewReno struct {
-	cwnd      uint32 // congestion window (bytes)
-	ssthresh  uint32 // slow start threshold (bytes)
-	mss       uint32 // max segment size (bytes)
-	dupAckCnt int    // consecutive duplicate ACK count
-	recovery  bool   // in fast recovery
+	cwnd        uint32 // congestion window (bytes)
+	ssthresh    uint32 // slow start threshold (bytes)
+	mss         uint32 // max segment size (bytes)
+	dupAckCnt   int    // consecutive duplicate ACK count
+	recovery    bool   // in fast recovery
+	recoverySeq uint32 // SND.NXT at time recovery was entered
 }
 
 // NewNewReno creates a NewReno congestion controller.
@@ -81,10 +86,11 @@ func (nr *NewReno) OnDupACK() bool {
 }
 
 // OnFastRetransmit enters fast recovery. RFC 5681 Section 3.2.
-func (nr *NewReno) OnFastRetransmit(flightSize uint32) {
+func (nr *NewReno) OnFastRetransmit(flightSize uint32, sndNxt uint32) {
 	nr.ssthresh = max(flightSize/2, 2*nr.mss)
 	nr.cwnd = nr.ssthresh + 3*nr.mss // inflate for the 3 dup ACKs
 	nr.recovery = true
+	nr.recoverySeq = sndNxt
 }
 
 // ExitRecovery leaves fast recovery, deflating cwnd. RFC 5681 Section 3.2.
@@ -92,6 +98,7 @@ func (nr *NewReno) ExitRecovery() {
 	nr.cwnd = nr.ssthresh
 	nr.recovery = false
 	nr.dupAckCnt = 0
+	nr.recoverySeq = 0
 }
 
 // OnTimeout handles RTO timeout. RFC 5681 Section 3.1.
@@ -100,6 +107,7 @@ func (nr *NewReno) OnTimeout() {
 	nr.cwnd = nr.mss // reset to 1 MSS (slow start)
 	nr.recovery = false
 	nr.dupAckCnt = 0
+	nr.recoverySeq = 0
 }
 
 // SendWindow returns the current congestion window.
@@ -112,6 +120,11 @@ func (nr *NewReno) InRecovery() bool {
 	return nr.recovery
 }
 
+// RecoverySeq returns the recovery point (SND.NXT at time of entering recovery).
+func (nr *NewReno) RecoverySeq() uint32 {
+	return nr.recoverySeq
+}
+
 // SSThresh returns the current slow start threshold.
 func (nr *NewReno) SSThresh() uint32 {
 	return nr.ssthresh
@@ -122,11 +135,12 @@ func (nr *NewReno) SSThresh() uint32 {
 // Above that threshold, it uses more aggressive increase/decrease functions
 // that scale better on high-BDP networks.
 type HighSpeed struct {
-	cwnd      uint32
-	ssthresh  uint32
-	mss       uint32
-	dupAckCnt int
-	recovery  bool
+	cwnd        uint32
+	ssthresh    uint32
+	mss         uint32
+	dupAckCnt   int
+	recovery    bool
+	recoverySeq uint32
 }
 
 // RFC 3649 parameters
@@ -212,7 +226,7 @@ func (hs *HighSpeed) OnDupACK() bool {
 	return false
 }
 
-func (hs *HighSpeed) OnFastRetransmit(flightSize uint32) {
+func (hs *HighSpeed) OnFastRetransmit(flightSize uint32, sndNxt uint32) {
 	wSegs := hs.cwnd / hs.mss
 	b := hstcpB(wSegs)
 	// ssthresh = (1 - b(w)) * cwnd
@@ -222,12 +236,14 @@ func (hs *HighSpeed) OnFastRetransmit(flightSize uint32) {
 	}
 	hs.cwnd = hs.ssthresh + 3*hs.mss
 	hs.recovery = true
+	hs.recoverySeq = sndNxt
 }
 
 func (hs *HighSpeed) ExitRecovery() {
 	hs.cwnd = hs.ssthresh
 	hs.recovery = false
 	hs.dupAckCnt = 0
+	hs.recoverySeq = 0
 }
 
 func (hs *HighSpeed) OnTimeout() {
@@ -240,8 +256,10 @@ func (hs *HighSpeed) OnTimeout() {
 	hs.cwnd = hs.mss
 	hs.recovery = false
 	hs.dupAckCnt = 0
+	hs.recoverySeq = 0
 }
 
-func (hs *HighSpeed) SendWindow() uint32 { return hs.cwnd }
-func (hs *HighSpeed) InRecovery() bool   { return hs.recovery }
-func (hs *HighSpeed) SSThresh() uint32   { return hs.ssthresh }
+func (hs *HighSpeed) SendWindow() uint32  { return hs.cwnd }
+func (hs *HighSpeed) InRecovery() bool    { return hs.recovery }
+func (hs *HighSpeed) RecoverySeq() uint32 { return hs.recoverySeq }
+func (hs *HighSpeed) SSThresh() uint32    { return hs.ssthresh }

@@ -4,6 +4,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"sync"
 
 	"github.com/KarpelesLab/slirp/vtcp"
 )
@@ -12,9 +13,9 @@ import (
 // to a real net.Conn (connection to the remote server). This replaces the
 // old tcpConn / tcpConn6 types.
 type tcpNATConn struct {
-	vc     *vtcp.Conn // TCP protocol engine (facing the virtual client)
-	remote net.Conn   // real connection to the destination server
-	closed bool
+	vc        *vtcp.Conn // TCP protocol engine (facing the virtual client)
+	remote    net.Conn   // real connection to the destination server
+	closeOnce sync.Once
 }
 
 // startBridge launches goroutines to copy data bidirectionally between
@@ -44,14 +45,12 @@ func (n *tcpNATConn) startBridge() {
 	}()
 }
 
-// close shuts down both connections.
+// close shuts down both connections. Safe to call from multiple goroutines.
 func (n *tcpNATConn) close() {
-	if n.closed {
-		return
-	}
-	n.closed = true
-	if n.remote != nil {
-		n.remote.Close()
-	}
-	n.vc.Abort()
+	n.closeOnce.Do(func() {
+		if n.remote != nil {
+			n.remote.Close()
+		}
+		n.vc.Abort()
+	})
 }

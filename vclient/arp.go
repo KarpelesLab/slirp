@@ -58,17 +58,40 @@ func (c *Client) resolveMAC(ctx context.Context, ip [4]byte) ([6]byte, error) {
 
 	// Send ARP request
 	if err := c.sendARPRequest(targetIP); err != nil {
+		c.removeARPWaiter(targetIP, ch)
 		return [6]byte{}, err
 	}
 
 	// Wait for response with timeout
+	timeout := time.NewTimer(3 * time.Second)
+	defer timeout.Stop()
+
 	select {
 	case mac := <-ch:
+		c.removeARPWaiter(targetIP, ch)
 		return mac, nil
 	case <-ctx.Done():
+		c.removeARPWaiter(targetIP, ch)
 		return [6]byte{}, ctx.Err()
-	case <-time.After(3 * time.Second):
+	case <-timeout.C:
+		c.removeARPWaiter(targetIP, ch)
 		return [6]byte{}, errors.New("ARP resolution timeout")
+	}
+}
+
+// removeARPWaiter removes a specific waiter channel from the arpWait map.
+func (c *Client) removeARPWaiter(ip [4]byte, ch chan [6]byte) {
+	c.arpMu.Lock()
+	defer c.arpMu.Unlock()
+	waiters := c.arpWait[ip]
+	for i, w := range waiters {
+		if w == ch {
+			c.arpWait[ip] = append(waiters[:i], waiters[i+1:]...)
+			break
+		}
+	}
+	if len(c.arpWait[ip]) == 0 {
+		delete(c.arpWait, ip)
 	}
 }
 

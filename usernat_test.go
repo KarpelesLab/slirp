@@ -185,7 +185,7 @@ func TestStackMaintenance(t *testing.T) {
 
 	vc := vtcp.NewConn(vtcp.ConnConfig{LocalPort: k.dstPort, RemotePort: k.srcPort, Writer: func([]byte) error { return nil }})
 	vc.Abort()
-	conn := &tcpNATConn{vc: vc, closed: true}
+	conn := &tcpNATConn{vc: vc}
 
 	s.mu.Lock()
 	s.tcp[k] = conn
@@ -317,12 +317,12 @@ func TestStackClose(t *testing.T) {
 		t.Errorf("expected 0 listeners6 after Close, got %d", len(s.listeners6))
 	}
 
-	// Verify that TCP connections are closed
-	if !tcpC.closed {
-		t.Error("TCP connection should be marked closed after Stack.Close()")
+	// Verify that TCP connections are closed (vtcp state should be Closed)
+	if tcpC.vc.State() != vtcp.StateClosed {
+		t.Error("TCP connection vtcp should be in CLOSED state after Stack.Close()")
 	}
-	if !tcp6C.closed {
-		t.Error("TCP6 connection should be marked closed after Stack.Close()")
+	if tcp6C.vc.State() != vtcp.StateClosed {
+		t.Error("TCP6 connection vtcp should be in CLOSED state after Stack.Close()")
 	}
 
 	if vc.State() != vtcp.StateClosed {
@@ -408,7 +408,7 @@ func TestMaintenanceCleanup_DirectSimulation(t *testing.T) {
 			// Put into SynReceived so it's not in StateClosed
 			vc.AcceptSYN(vtcp.Segment{SrcPort: 12345, DstPort: 80, Seq: 1000, Flags: vtcp.FlagSYN, Window: 65535})
 		}
-		return &tcpNATConn{vc: vc, closed: closed}
+		return &tcpNATConn{vc: vc}
 	}
 
 	// Closed TCP connection (should be cleaned up)
@@ -459,15 +459,13 @@ func TestMaintenanceCleanup_DirectSimulation(t *testing.T) {
 	// Simulate the maintenance cleanup logic (same as maintenance() body)
 	s.mu.Lock()
 	for k, c := range s.tcp {
-		st := c.vc.State()
-		if st == vtcp.StateClosed || st == vtcp.StateTimeWait || c.closed {
+		if c.vc.State() == vtcp.StateClosed {
 			c.close()
 			delete(s.tcp, k)
 		}
 	}
 	for k, c := range s.tcp6 {
-		st := c.vc.State()
-		if st == vtcp.StateClosed || st == vtcp.StateTimeWait || c.closed {
+		if c.vc.State() == vtcp.StateClosed {
 			c.close()
 			delete(s.tcp6, k)
 		}

@@ -53,7 +53,7 @@ func TestNewRenoFastRetransmit(t *testing.T) {
 	}
 
 	// Enter fast recovery
-	nr.OnFastRetransmit(8000) // flight size = 8000
+	nr.OnFastRetransmit(8000, 10000) // flight size = 8000
 	// ssthresh = max(8000/2, 2*1000) = max(4000, 2000) = 4000
 	if nr.SSThresh() != 4000 {
 		t.Errorf("ssthresh = %d, want 4000", nr.SSThresh())
@@ -73,7 +73,7 @@ func TestNewRenoRecoveryInflation(t *testing.T) {
 	nr.OnDupACK()
 	nr.OnDupACK()
 	nr.OnDupACK()
-	nr.OnFastRetransmit(8000)
+	nr.OnFastRetransmit(8000, 10000)
 
 	before := nr.SendWindow()
 	// Additional dup ACKs during recovery inflate cwnd
@@ -89,7 +89,7 @@ func TestNewRenoExitRecovery(t *testing.T) {
 	nr.OnDupACK()
 	nr.OnDupACK()
 	nr.OnDupACK()
-	nr.OnFastRetransmit(8000)
+	nr.OnFastRetransmit(8000, 10000)
 
 	nr.ExitRecovery()
 	// cwnd should deflate to ssthresh
@@ -205,7 +205,7 @@ func TestHighSpeedDecrease(t *testing.T) {
 	hs.OnDupACK()
 	hs.OnDupACK()
 	hs.OnDupACK()
-	hs.OnFastRetransmit(80000)
+	hs.OnFastRetransmit(80000, 100000)
 
 	// b(100) ≈ 0.38, so ssthresh ≈ (1-0.38)*100000 = 62000
 	// Standard TCP would give 50000

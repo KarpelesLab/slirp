@@ -18,7 +18,7 @@ This library implements a lightweight, user-space networking stack that intercep
 
 ## Features
 
-- **TCP Connection Handling**: Full TCP state machine with flow control, windowing, and retransmission (IPv4 and IPv6)
+- **TCP Connection Handling**: Full TCP state machine with flow control, windowing, retransmission, and congestion control (IPv4 and IPv6)
 - **UDP Support**: Stateless UDP packet forwarding with connection tracking (IPv4 and IPv6)
 - **IPv6 Support**: Comprehensive IPv6 support including:
   - TCP and UDP connection handling
@@ -301,24 +301,27 @@ Virtual connection type that implements `net.Conn`. Returned by `Listener.Accept
 - `Close() error`: Closes the connection
 - `LocalAddr() net.Addr`: Returns the local network address
 - `RemoteAddr() net.Addr`: Returns the remote network address
-- `SetDeadline(t time.Time) error`: Not implemented
-- `SetReadDeadline(t time.Time) error`: Not implemented
-- `SetWriteDeadline(t time.Time) error`: Not implemented
+- `SetDeadline(t time.Time) error`: Sets both read and write deadlines
+- `SetReadDeadline(t time.Time) error`: Sets the read deadline
+- `SetWriteDeadline(t time.Time) error`: Sets the write deadline
 
 ## Implementation Details
 
 ### TCP Handling
 
-The library implements a simplified TCP state machine:
+The library implements a full, RFC-compliant TCP state machine:
 
 1. **Connection Establishment**: SYN packets trigger real TCP connections to destination hosts
 2. **Data Transfer**: In-order data delivery with flow control based on receive window
 3. **Flow Control**: Respects client's advertised window size, implements backpressure
-4. **Connection Teardown**: Proper FIN handling for graceful connection closure
-5. **MSS Negotiation**: Parses and respects Maximum Segment Size from client SYN
+4. **Congestion Control**: NewReno (RFC 5681) with slow start, congestion avoidance, fast retransmit, and fast recovery
+5. **Connection Teardown**: Proper FIN handling for graceful connection closure
+6. **TCP Options**: MSS, Window Scaling (RFC 7323), Timestamps (RFC 7323), SACK (RFC 2018)
 
 **Features:**
-- Automatic retransmission for window probe
+- Full retransmission with RTO calculation per RFC 6298 (SRTT, RTTVAR, Karn's algorithm)
+- Selective Acknowledgment (SACK) for efficient loss recovery
+- Timestamp-based RTT measurement and PAWS protection
 - Send queue buffering (up to 1MB per connection)
 - Idle timeout: 2 minutes
 - Maintenance interval: 5 seconds
@@ -350,8 +353,6 @@ A background goroutine runs every 30 seconds to clean up:
 - No ICMPv4 support (ping won't work for IPv4)
 - No IPv6 extension header handling
 - No IP fragmentation handling
-- Simplified TCP implementation (no congestion control, limited retransmission)
-- No support for TCP options beyond MSS
 - ICMPv6 Router Advertisement not yet implemented (Router Solicitation is ignored)
 
 ## License

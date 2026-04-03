@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,10 +46,11 @@ func connectPair(t *testing.T, p *Pair) {
 	// Approach: override the AtoB deliver for the first SYN to call AcceptSYN,
 	// then switch to HandleSegment for subsequent packets.
 
-	synHandled := false
+	var synHandled atomic.Bool
+	p.link.AtoB.mu.Lock()
 	origDeliver := p.link.AtoB.deliver
 	p.link.AtoB.deliver = func(data []byte) {
-		if synHandled {
+		if synHandled.Load() {
 			origDeliver(data)
 			return
 		}
@@ -57,7 +59,7 @@ func connectPair(t *testing.T, p *Pair) {
 			return
 		}
 		if seg.HasFlag(vtcp.FlagSYN) && !seg.HasFlag(vtcp.FlagACK) {
-			synHandled = true
+			synHandled.Store(true)
 			pkts := p.server.AcceptSYN(seg)
 			p.link.AtoB.mu.Lock()
 			p.link.AtoB.deliver = origDeliver
@@ -69,6 +71,7 @@ func connectPair(t *testing.T, p *Pair) {
 		}
 		origDeliver(data)
 	}
+	p.link.AtoB.mu.Unlock()
 
 	err := p.client.Connect(ctx)
 	if err != nil {
@@ -168,17 +171,19 @@ func transferUntil(t *testing.T, src, dst *vtcp.Conn, maxBytes int, maxDuration 
 	errCh := make(chan error, 2)
 	doneCh := make(chan struct{})
 
+	var written atomic.Int64
+	var received atomic.Int64
+
 	// Writer
-	written := 0
 	go func() {
 		buf := make([]byte, 32768)
 		for i := range buf {
 			buf[i] = byte(i % 251)
 		}
-		for written < maxBytes && time.Now().Before(deadline) {
+		for written.Load() < int64(maxBytes) && time.Now().Before(deadline) {
 			chunk := buf
-			remaining := maxBytes - written
-			if len(chunk) > remaining {
+			remaining := int64(maxBytes) - written.Load()
+			if int64(len(chunk)) > remaining {
 				chunk = chunk[:remaining]
 			}
 			n, err := src.Write(chunk)
@@ -186,14 +191,13 @@ func transferUntil(t *testing.T, src, dst *vtcp.Conn, maxBytes int, maxDuration 
 				errCh <- err
 				return
 			}
-			written += n
+			written.Add(int64(n))
 		}
 		close(doneCh)
 		errCh <- nil
 	}()
 
 	// Reader
-	received := 0
 	go func() {
 		buf := make([]byte, 65536)
 		for {
@@ -203,7 +207,7 @@ func transferUntil(t *testing.T, src, dst *vtcp.Conn, maxBytes int, maxDuration 
 			if err != nil {
 				select {
 				case <-doneCh:
-					if received >= written {
+					if received.Load() >= written.Load() {
 						errCh <- nil
 						return
 					}
@@ -212,10 +216,10 @@ func transferUntil(t *testing.T, src, dst *vtcp.Conn, maxBytes int, maxDuration 
 				errCh <- err
 				return
 			}
-			received += n
+			received.Add(int64(n))
 			select {
 			case <-doneCh:
-				if received >= written {
+				if received.Load() >= written.Load() {
 					errCh <- nil
 					return
 				}
@@ -227,11 +231,11 @@ func transferUntil(t *testing.T, src, dst *vtcp.Conn, maxBytes int, maxDuration 
 	start := time.Now()
 	for range 2 {
 		if err := <-errCh; err != nil {
-			t.Fatalf("transfer error at %d/%d bytes: %v", received, written, err)
+			t.Fatalf("transfer error at %d/%d bytes: %v", received.Load(), written.Load(), err)
 		}
 	}
 	elapsed = time.Since(start)
-	transferred = received
+	transferred = int(received.Load())
 	if elapsed > 0 {
 		throughput = float64(transferred) / elapsed.Seconds()
 	}
@@ -376,10 +380,11 @@ func BenchmarkThroughputClean(b *testing.B) {
 
 	// Manual connect for benchmarks
 	ctx := context.Background()
-	synHandled := false
+	var synHandled atomic.Bool
+	p.link.AtoB.mu.Lock()
 	origDeliver := p.link.AtoB.deliver
 	p.link.AtoB.deliver = func(data []byte) {
-		if synHandled {
+		if synHandled.Load() {
 			origDeliver(data)
 			return
 		}
@@ -388,7 +393,7 @@ func BenchmarkThroughputClean(b *testing.B) {
 			return
 		}
 		if seg.HasFlag(vtcp.FlagSYN) && !seg.HasFlag(vtcp.FlagACK) {
-			synHandled = true
+			synHandled.Store(true)
 			pkts := p.server.AcceptSYN(seg)
 			p.link.AtoB.mu.Lock()
 			p.link.AtoB.deliver = origDeliver
@@ -400,6 +405,7 @@ func BenchmarkThroughputClean(b *testing.B) {
 		}
 		origDeliver(data)
 	}
+	p.link.AtoB.mu.Unlock()
 	if err := p.client.Connect(ctx); err != nil {
 		b.Fatal(err)
 	}
@@ -418,11 +424,4 @@ func BenchmarkThroughputClean(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

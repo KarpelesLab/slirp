@@ -110,13 +110,23 @@ type Conn struct {
 	wscaleOK    bool  // both sides negotiated window scaling
 
 	// Timestamps (RFC 7323)
-	tsEnabled bool
+	tsEnabled bool   // local config: want timestamps
+	tsOK      bool   // negotiated: both sides support timestamps
 	tsRecent  uint32 // most recent TSval from remote
 	tsOffset  uint32 // our timestamp base (monotonic)
 
 	// SACK (RFC 2018)
 	sackEnabled bool
 	sackOK      bool // both sides negotiated SACK
+
+	// Deferred FIN: when a FIN arrives out of order, we defer the state
+	// transition until the gap fills and the FIN sequence becomes in-order.
+	finPending    bool
+	pendingFinSeq uint32
+
+	// Configuration preserved for re-initialization after handshake
+	sendBufCap int
+	ccName     string
 
 	// Persist timer (RFC 9293 §3.7.7 — zero-window probing)
 	persistTimer   *time.Timer
@@ -166,6 +176,11 @@ func NewConn(cfg ConnConfig) *Conn {
 		}
 	}
 
+	sendBufCap := cfg.SendBufSize
+	if sendBufCap <= 0 {
+		sendBufCap = DefaultSendBuf
+	}
+
 	c := &Conn{
 		localPort:   cfg.LocalPort,
 		remotePort:  cfg.RemotePort,
@@ -186,6 +201,10 @@ func NewConn(cfg ConnConfig) *Conn {
 		rcvWndShift: rcvWndShift,
 		tsEnabled:   cfg.EnableTimestamps,
 		sackEnabled: cfg.EnableSACK,
+
+		// Preserved config
+		sendBufCap: sendBufCap,
+		ccName:     cfg.CongestionControl,
 
 		// Keepalive
 		keepalive:     cfg.Keepalive,
@@ -239,17 +258,16 @@ func (c *Conn) flushPackets(pkts [][]byte) {
 
 func (c *Conn) rcvWindow() uint16 {
 	// Advertise available receive buffer space, scaled by our shift factor.
+	// Uses RecvBuf.Window() which correctly accounts for OOO data.
 	c.recvMu.Lock()
-	used := 0
+	var avail int
 	if c.recvBuf != nil {
-		used = c.recvBuf.Readable()
+		avail = int(c.recvBuf.Window())
+	} else {
+		avail = c.recvBufSize()
 	}
 	c.recvMu.Unlock()
 
-	avail := c.recvBufSize() - used
-	if avail < 0 {
-		avail = 0
-	}
 	if c.wscaleOK {
 		avail >>= c.rcvWndShift
 	}
@@ -359,7 +377,7 @@ func (c *Conn) AcceptSYN(syn Segment) [][]byte {
 
 	// Initialize sequence numbers
 	iss := randUint32()
-	c.sendBuf = NewSendBuf(DefaultSendBuf, iss)
+	c.sendBuf = NewSendBuf(c.sendBufCap, iss)
 	c.recvBuf = NewRecvBuf(syn.Seq+1, c.recvBufCap) // SYN consumed 1 seq
 
 	c.state = StateSynReceived
@@ -402,6 +420,27 @@ func (c *Conn) negotiateOptions(remoteOpts []Option) {
 	// Timestamps
 	if c.tsEnabled {
 		if tsVal, _, ok := GetTimestamp(remoteOpts); ok {
+			c.tsRecent = tsVal
+			c.tsOK = true
+		}
+	}
+}
+
+// addOptions appends negotiated options (timestamps, SACK) to a segment.
+// Called from all segment builders after the handshake is complete.
+func (c *Conn) addOptions(seg *Segment) {
+	if c.tsOK {
+		seg.Options = append(seg.Options, TimestampOption(c.tsNow(), c.tsRecent))
+	}
+	if c.sackOK && c.recvBuf != nil && c.recvBuf.HasOOO() {
+		seg.Options = append(seg.Options, SACKOption(c.recvBuf.SACKBlocks()))
+	}
+}
+
+// updateTimestamp extracts and stores the remote's timestamp from incoming options.
+func (c *Conn) updateTimestamp(opts []Option) {
+	if c.tsOK {
+		if tsVal, _, ok := GetTimestamp(opts); ok {
 			c.tsRecent = tsVal
 		}
 	}
@@ -569,7 +608,6 @@ func (c *Conn) handleSynchronized(seg Segment) [][]byte {
 		c.stopRTO()
 		c.stopPersist()
 		c.stopKeepalive()
-		c.stopPersist()
 		c.recvCond.Broadcast()
 		c.sendCond.Broadcast()
 		c.safeCloseEstablished()
@@ -668,7 +706,7 @@ func (c *Conn) handleSynSent(seg Segment) [][]byte {
 
 		c.recvBuf = NewRecvBuf(seg.Seq+1, c.recvBufCap)
 		c.sndWnd = uint32(seg.Window) << c.sndWndShift
-		c.cc = NewHighSpeed(uint32(c.mss))
+		c.cc = newCongestionController(c.ccName, uint32(c.mss))
 		c.rto.AckReceived(seg.Ack)
 		c.state = StateEstablished
 
@@ -756,9 +794,12 @@ func (c *Conn) handleEstablished(seg Segment) [][]byte {
 func (c *Conn) handleDataState(seg Segment) [][]byte {
 	needACK := false
 
+	// Update remote's timestamp for RTTM (RFC 7323)
+	c.updateTimestamp(seg.Options)
+
 	// Process ACK
 	if seg.HasFlag(FlagACK) {
-		c.processACK(seg.Ack)
+		c.processACK(seg.Ack, seg.Options)
 		c.sndWnd = uint32(seg.Window) << c.sndWndShift
 	}
 
@@ -768,35 +809,22 @@ func (c *Conn) handleDataState(seg Segment) [][]byte {
 		needACK = true
 	}
 
-	// Process FIN
+	// Process FIN — only transition state when FIN is in-order.
+	// An OOO FIN is deferred until the gap fills.
 	if seg.HasFlag(FlagFIN) {
 		c.recvMu.Lock()
 		finSeq := seg.Seq + seg.DataLen()
 		if finSeq == c.recvBuf.Nxt() {
 			c.recvBuf.nxt++
-		}
-		c.recvMu.Unlock()
-		needACK = true
-
-		switch c.state {
-		case StateEstablished:
-			c.state = StateCloseWait
-			c.safeCloseFinRecvd()
-		case StateFinWait1:
-			if seg.HasFlag(FlagACK) && seg.Ack == c.sendBuf.NXT() {
-				// Simultaneous FIN+ACK of our FIN
-				c.state = StateTimeWait
-				c.stopRTO()
-				c.startTimeWait()
-			} else {
-				c.state = StateClosing
-			}
-			c.safeCloseFinRecvd()
-		case StateFinWait2:
-			c.state = StateTimeWait
-			c.stopRTO()
-			c.startTimeWait()
-			c.safeCloseFinRecvd()
+			c.recvMu.Unlock()
+			needACK = true
+			c.processFINStateTransition()
+		} else {
+			// FIN is out of order — defer until gap fills
+			c.finPending = true
+			c.pendingFinSeq = finSeq
+			c.recvMu.Unlock()
+			needACK = true
 		}
 	} else if c.state == StateFinWait1 && seg.HasFlag(FlagACK) && seg.Ack == c.sendBuf.NXT() {
 		c.state = StateFinWait2
@@ -807,6 +835,32 @@ func (c *Conn) handleDataState(seg Segment) [][]byte {
 	}
 
 	return c.drainOutgoing()
+}
+
+// processFINStateTransition handles the TCP state machine transition when
+// a FIN has been received and is in-order (its sequence == RCV.NXT).
+func (c *Conn) processFINStateTransition() {
+	switch c.state {
+	case StateEstablished:
+		c.state = StateCloseWait
+		c.safeCloseFinRecvd()
+	case StateFinWait1:
+		// Check if our FIN has been acknowledged
+		if c.sendBuf.Unacked() == 0 {
+			// Simultaneous FIN+ACK of our FIN
+			c.state = StateTimeWait
+			c.stopRTO()
+			c.startTimeWait()
+		} else {
+			c.state = StateClosing
+		}
+		c.safeCloseFinRecvd()
+	case StateFinWait2:
+		c.state = StateTimeWait
+		c.stopRTO()
+		c.startTimeWait()
+		c.safeCloseFinRecvd()
+	}
 }
 
 func (c *Conn) handleFinWait1(seg Segment) [][]byte {
@@ -820,7 +874,7 @@ func (c *Conn) handleFinWait2(seg Segment) [][]byte {
 func (c *Conn) handleCloseWait(seg Segment) [][]byte {
 	// Only process ACKs (for data we're still sending)
 	if seg.HasFlag(FlagACK) {
-		c.processACK(seg.Ack)
+		c.processACK(seg.Ack, seg.Options)
 	}
 	return c.drainOutgoing()
 }
@@ -853,19 +907,37 @@ func (c *Conn) handleLastAck(seg Segment) [][]byte {
 func (c *Conn) processData(seg Segment) {
 	c.recvMu.Lock()
 	n := c.recvBuf.Insert(seg.Seq, seg.Payload)
+
+	// Check if a previously deferred OOO FIN is now in-order
+	finReady := false
+	if c.finPending && c.pendingFinSeq == c.recvBuf.Nxt() {
+		c.recvBuf.nxt++
+		c.finPending = false
+		finReady = true
+	}
 	c.recvMu.Unlock()
+
 	if n > 0 {
 		c.recvCond.Broadcast()
 	}
+	if finReady {
+		c.processFINStateTransition()
+	}
 }
 
-func (c *Conn) processACK(ack uint32) {
+func (c *Conn) processACK(ack uint32, opts []Option) {
 	if !SeqAfter(ack, c.sendBuf.UNA()) {
 		// Duplicate ACK
 		if c.cc.OnDupACK() {
 			// Fast retransmit
-			c.cc.OnFastRetransmit(uint32(c.sendBuf.Unacked()))
+			c.cc.OnFastRetransmit(uint32(c.sendBuf.Unacked()), c.sendBuf.NXT())
 			c.retransmit()
+		}
+		// Even on dup ACKs, update SACK scoreboard
+		if c.sackOK {
+			if blocks := GetSACKBlocks(opts); len(blocks) > 0 {
+				c.sendBuf.MarkSACKed(blocks)
+			}
 		}
 		return
 	}
@@ -877,6 +949,13 @@ func (c *Conn) processACK(ack uint32) {
 	c.retries = 0
 	c.cc.OnACK(acked)
 
+	// Update SACK scoreboard
+	if c.sackOK {
+		if blocks := GetSACKBlocks(opts); len(blocks) > 0 {
+			c.sendBuf.MarkSACKed(blocks)
+		}
+	}
+
 	// Stop persist timer if window has opened
 	if c.sndWnd > 0 && c.persistTimer != nil {
 		c.stopPersist()
@@ -885,8 +964,8 @@ func (c *Conn) processACK(ack uint32) {
 	// RTT sample (Karn's: only for non-retransmitted)
 	c.rto.AckReceived(ack)
 
-	// Check if we're exiting fast recovery
-	if c.cc.InRecovery() && SeqAfterEq(ack, c.sendBuf.NXT()) {
+	// Check if we're exiting fast recovery (recovery point reached)
+	if c.cc.InRecovery() && SeqAfterEq(ack, c.cc.RecoverySeq()) {
 		c.cc.ExitRecovery()
 	}
 
@@ -917,6 +996,7 @@ func (c *Conn) retransmit() {
 		Window:  c.rcvWindow(),
 		Payload: data,
 	}
+	c.addOptions(&seg)
 	c.queueSeg(seg)
 	c.rto.InvalidateTiming() // Karn's algorithm
 	c.startRTO()
@@ -950,6 +1030,7 @@ func (c *Conn) flushSendQueue() {
 			Window:  c.rcvWindow(),
 			Payload: data,
 		}
+		c.addOptions(&seg)
 		c.queueSeg(seg)
 		c.sendBuf.AdvanceSent(len(data))
 
@@ -976,6 +1057,7 @@ func (c *Conn) queueACK() {
 		Flags:   FlagACK,
 		Window:  c.rcvWindow(),
 	}
+	c.addOptions(&seg)
 	c.queueSeg(seg)
 }
 
@@ -1144,7 +1226,7 @@ func (c *Conn) startTimeWait() {
 func (c *Conn) startKeepalive() {
 	c.stopKeepalive()
 	c.stopPersist()
-	c.keepaliveTimer = time.AfterFunc(c.keepaliveIntv, c.onKeepalive)
+	c.keepaliveTimer = time.AfterFunc(c.keepaliveIdle, c.onKeepalive)
 }
 
 func (c *Conn) stopKeepalive() {
@@ -1187,6 +1269,7 @@ func (c *Conn) onKeepalive() {
 			Flags:   FlagACK,
 			Window:  c.rcvWindow(),
 		}
+		c.addOptions(&seg)
 		c.queueSeg(seg)
 		c.keepaliveSent++
 	}
@@ -1244,8 +1327,18 @@ func (c *Conn) Write(b []byte) (int, error) {
 	for written < len(b) {
 		n := c.sendBuf.Write(b[written:])
 		if n == 0 {
-			// Buffer full, wait for ACKs to drain it
-			c.sendCond.Wait()
+			// Check write deadline before blocking
+			if dl, ok := c.writeDeadline.Load().(time.Time); ok && !dl.IsZero() {
+				if time.Now().After(dl) {
+					c.mu.Unlock()
+					return written, &net.OpError{Op: "write", Err: errors.New("i/o timeout")}
+				}
+				timer := time.AfterFunc(time.Until(dl), func() { c.sendCond.Broadcast() })
+				c.sendCond.Wait()
+				timer.Stop()
+			} else {
+				c.sendCond.Wait()
+			}
 			if c.closed.Load() {
 				c.mu.Unlock()
 				return written, errors.New("connection closed")
@@ -1312,6 +1405,7 @@ func (c *Conn) queueFIN() {
 		Flags:   FlagFIN | FlagACK,
 		Window:  c.rcvWindow(),
 	}
+	c.addOptions(&seg)
 	c.queueSeg(seg)
 	c.sendBuf.AdvanceSent(1) // FIN consumes 1 seq
 }
@@ -1363,7 +1457,7 @@ func (c *Conn) Writer() SegmentWriter { return c.writer }
 func (c *Conn) SetupForHandshake(iss uint32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.sendBuf = NewSendBuf(c.recvBufSize(), iss)
+	c.sendBuf = NewSendBuf(c.sendBufCap, iss)
 	c.recvBuf = NewRecvBuf(0, c.recvBufCap)
 	c.state = StateSynSent
 	c.sendBuf.AdvanceSent(1) // SYN consumes 1 seq
@@ -1384,6 +1478,7 @@ func (c *Conn) SetReadDeadline(t time.Time) error {
 
 func (c *Conn) SetWriteDeadline(t time.Time) error {
 	c.writeDeadline.Store(t)
+	c.sendCond.Broadcast()
 	return nil
 }
 

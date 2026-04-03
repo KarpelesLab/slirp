@@ -15,6 +15,11 @@ type SendBuf struct {
 	una uint32 // SND.UNA: first unacked sequence
 	nxt uint32 // SND.NXT: next sequence to send
 
+	// SACK scoreboard: tracks sequence ranges the receiver has reported
+	// as received out of order (RFC 2018). Used to avoid retransmitting
+	// data the receiver already has.
+	sacked []SACKBlock
+
 	// buf[0] corresponds to sequence 'una'.
 	// buf[0 .. nxt-una) is sent but unacked.
 	// buf[nxt-una .. len(buf)) is unsent.
@@ -86,16 +91,88 @@ func (s *SendBuf) Acknowledge(ack uint32) uint32 {
 	}
 	s.buf = s.buf[n:]
 	s.una = ack
+
+	// Remove SACK blocks that are now below UNA
+	s.pruneSACK()
+
 	return n
 }
 
-// RetransmitData returns the first n bytes of unacknowledged data (from una).
+// MarkSACKed records SACK blocks from the receiver. These indicate
+// out-of-order data the receiver holds. Used to avoid retransmitting
+// already-received segments.
+func (s *SendBuf) MarkSACKed(blocks []SACKBlock) {
+	if len(blocks) == 0 {
+		return
+	}
+	// Replace the scoreboard with the latest SACK info from the receiver.
+	// Each ACK with SACK provides a fresh view of the receiver's OOO state.
+	s.sacked = make([]SACKBlock, 0, len(blocks))
+	for _, b := range blocks {
+		// Only keep blocks within our unacked range
+		if SeqAfter(b.Right, s.una) && SeqBefore(b.Left, s.nxt) {
+			s.sacked = append(s.sacked, b)
+		}
+	}
+}
+
+// pruneSACK removes SACK blocks that have been cumulatively acknowledged.
+func (s *SendBuf) pruneSACK() {
+	j := 0
+	for _, b := range s.sacked {
+		if SeqAfter(b.Right, s.una) {
+			s.sacked[j] = b
+			j++
+		}
+	}
+	s.sacked = s.sacked[:j]
+}
+
+// IsSACKed reports whether the given sequence number has been selectively
+// acknowledged by the receiver.
+func (s *SendBuf) IsSACKed(seq uint32) bool {
+	for _, b := range s.sacked {
+		if SeqAfterEq(seq, b.Left) && SeqBefore(seq, b.Right) {
+			return true
+		}
+	}
+	return false
+}
+
+// RetransmitData returns the first n bytes of unacknowledged data (from una),
+// skipping any SACK'd ranges to avoid redundant retransmissions.
 func (s *SendBuf) RetransmitData(n int) []byte {
 	unacked := int(s.nxt - s.una)
 	if unacked > len(s.buf) {
 		unacked = len(s.buf)
 	}
-	data := s.buf[:unacked]
+
+	if len(s.sacked) == 0 {
+		// No SACK info — retransmit from UNA
+		data := s.buf[:unacked]
+		if len(data) > n {
+			data = data[:n]
+		}
+		return data
+	}
+
+	// Find the first unsacked byte starting from UNA
+	seq := s.una
+	for {
+		if !s.IsSACKed(seq) {
+			break
+		}
+		seq++
+		if SeqAfterEq(seq, s.nxt) {
+			return nil // everything is SACKed
+		}
+	}
+
+	offset := int(seq - s.una)
+	if offset >= unacked {
+		return nil
+	}
+	data := s.buf[offset:unacked]
 	if len(data) > n {
 		data = data[:n]
 	}

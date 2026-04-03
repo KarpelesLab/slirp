@@ -69,6 +69,10 @@ type TCPConn struct {
 	rttSeq   uint32    // seq of the segment being timed
 	retries  int
 
+	// Keepalive
+	lastRecv      time.Time // last time a segment was received
+	keepaliveSent int       // unanswered keepalive probes
+
 	// Lifecycle
 	closed          atomic.Bool
 	established     chan struct{} // closed when handshake completes
@@ -94,6 +98,7 @@ func newTCPConn(c *Client, localIP [4]byte, localPort uint16, remoteIP [4]byte, 
 		mss:         1460,
 		sndWnd:      65535,
 		rto:         time.Second,
+		lastRecv:    time.Now(),
 		established: make(chan struct{}),
 		finRecvd:    make(chan struct{}),
 	}
@@ -173,6 +178,9 @@ func (tc *TCPConn) handleSegment(ip []byte, ihl int) {
 	var signalEstablished, signalFinRecvd, signalRecv, signalSend, needUnregister bool
 
 	tc.mu.Lock()
+
+	tc.lastRecv = time.Now()
+	tc.keepaliveSent = 0
 
 	// RST — tear down immediately
 	if (flags & 0x04) != 0 {
@@ -291,6 +299,7 @@ func (tc *TCPConn) handleSegment(ip []byte, ihl int) {
 	}
 	if signalEstablished {
 		tc.safeCloseEstablished()
+		go tc.keepaliveLoop()
 	}
 	if signalFinRecvd {
 		tc.safeCloseFinRecvd()
@@ -557,6 +566,59 @@ func (tc *TCPConn) timeWait() {
 	tc.mu.Unlock()
 	tc.unregister()
 	tc.recvCond.Broadcast()
+}
+
+// keepaliveLoop sends periodic keepalive probes for idle connections.
+func (tc *TCPConn) keepaliveLoop() {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		tc.mu.Lock()
+		if tc.closed.Load() || tc.state == tcpClosed {
+			tc.mu.Unlock()
+			return
+		}
+		if tc.state != tcpEstablished && tc.state != tcpCloseWait {
+			tc.mu.Unlock()
+			return
+		}
+		if time.Since(tc.lastRecv) > 30*time.Second {
+			if tc.keepaliveSent >= 3 {
+				// No response after 3 probes — abort
+				tc.state = tcpClosed
+				tc.closed.Store(true)
+				tc.stopRTO()
+				tc.mu.Unlock()
+				tc.unregister()
+				tc.recvCond.Broadcast()
+				tc.sendCond.Broadcast()
+				tc.safeCloseEstablished()
+				tc.safeCloseFinRecvd()
+				return
+			}
+			// Send keepalive probe: ACK with seq-1
+			tc.buildKeepaliveProbe()
+			tc.keepaliveSent++
+			pkts := tc.drainOutgoing()
+			tc.mu.Unlock()
+			tc.flushPackets(pkts)
+		} else {
+			tc.mu.Unlock()
+		}
+	}
+}
+
+// buildKeepaliveProbe queues a keepalive probe (ACK with seq-1). Must hold tc.mu.
+func (tc *TCPConn) buildKeepaliveProbe() {
+	tcpHdr := make([]byte, 20)
+	binary.BigEndian.PutUint16(tcpHdr[0:2], tc.localPort)
+	binary.BigEndian.PutUint16(tcpHdr[2:4], tc.remotePort)
+	binary.BigEndian.PutUint32(tcpHdr[4:8], tc.sndNxt-1) // seq-1 is the keepalive signal
+	binary.BigEndian.PutUint32(tcpHdr[8:12], tc.rcvNxt)
+	tcpHdr[12] = 5 << 4
+	tcpHdr[13] = 0x10 // ACK
+	binary.BigEndian.PutUint16(tcpHdr[14:16], 65535)
+	tc.queueSend(tc.buildIPPacket(tcpHdr, nil))
 }
 
 func (tc *TCPConn) safeCloseEstablished() {

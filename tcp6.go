@@ -33,11 +33,12 @@ type tcpConn6 struct {
 	gwMAC     [6]byte
 	w         Writer
 
-	conn        net.Conn
-	established bool
-	lastAct     time.Time
-	closed      bool
-	cond        *sync.Cond
+	conn           net.Conn
+	established    bool
+	lastAct        time.Time
+	closed         bool
+	keepaliveSent  int // unanswered keepalive probes
+	cond           *sync.Cond
 }
 
 func newTCPConn6(srcIP [16]byte, srcPort uint16, dstIP [16]byte, dstPort uint16, clientMAC, gwMAC [6]byte, w Writer) *tcpConn6 {
@@ -79,6 +80,7 @@ func (t *tcpConn6) handleOutbound(packet []byte) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.lastAct = time.Now()
+	t.keepaliveSent = 0
 	t.recvWnd = wnd
 
 	// RST - tear down connection immediately
@@ -274,9 +276,29 @@ func (t *tcpConn6) maintenanceLoop() {
 			t.mu.Unlock()
 			return
 		}
+		// Window probe
 		if (len(t.sendQ) > 0 || t.sUnacked > 0) && (int(t.recvWnd)-int(t.sUnacked) <= 0) {
 			pkt := BuildTCPPacket6(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq-1, t.cSeq, 0x10, nil)
 			_ = t.w(pkt)
+		}
+		// Keepalive: probe idle established connections
+		if t.established && time.Since(t.lastAct) > 30*time.Second {
+			if t.keepaliveSent >= 3 {
+				// No response after 3 probes — close connection
+				t.closed = true
+				if t.conn != nil {
+					_ = t.conn.Close()
+				}
+				pkt := BuildTCPPacket6(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x04, nil) // RST
+				_ = t.w(pkt)
+				t.mu.Unlock()
+				t.cond.Broadcast()
+				return
+			}
+			// Send keepalive probe (ACK with seq-1)
+			pkt := BuildTCPPacket6(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq-1, t.cSeq, 0x10, nil)
+			_ = t.w(pkt)
+			t.keepaliveSent++
 		}
 		t.mu.Unlock()
 	}

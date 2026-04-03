@@ -168,9 +168,17 @@ func TestStressClean(t *testing.T) {
 }
 
 func TestStressWithDelay(t *testing.T) {
-	for _, delay := range []time.Duration{5 * time.Millisecond, 25 * time.Millisecond} {
-		t.Run(delay.String(), func(t *testing.T) {
-			p, err := NewPair(LinkConfig{Delay: delay})
+	tests := []struct {
+		delay time.Duration
+		size  int
+	}{
+		{5 * time.Millisecond, 4 * 1024 * 1024},
+		{25 * time.Millisecond, 4 * 1024 * 1024},
+		{50 * time.Millisecond, 4 * 1024 * 1024},
+	}
+	for _, tt := range tests {
+		t.Run(tt.delay.String(), func(t *testing.T) {
+			p, err := NewPair(LinkConfig{Delay: tt.delay})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -178,12 +186,11 @@ func TestStressWithDelay(t *testing.T) {
 
 			connectPair(t, p)
 
-			size := 64 * 1024
-			tp, elapsed := transferData(t, p.Client(), p.Server(), size)
+			tp, elapsed := transferData(t, p.Client(), p.Server(), tt.size)
 
 			aToB, bToA := p.Link().Stats()
 			t.Logf("Delay %v: %d KB in %v (%.1f MB/s) | c→s: %d sent %d delivered | s→c: %d sent %d delivered",
-				delay, size/1024, elapsed, tp/1e6,
+				tt.delay, tt.size/1024, elapsed, tp/1e6,
 				aToB.Sent.Load(), aToB.Delivered.Load(),
 				bToA.Sent.Load(), bToA.Delivered.Load())
 		})
@@ -201,7 +208,7 @@ func TestStressWithLoss(t *testing.T) {
 
 			connectPair(t, p)
 
-			size := 32 * 1024
+			size := 128 * 1024
 			tp, elapsed := transferData(t, p.Client(), p.Server(), size)
 
 			aToB, bToA := p.Link().Stats()

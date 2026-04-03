@@ -31,10 +31,10 @@ type NewReno struct {
 }
 
 // NewNewReno creates a NewReno congestion controller.
-// Initial cwnd is set to min(10*MSS, max(2*MSS, 4380)) per RFC 6928.
+// Initial cwnd is set to min(10*MSS, max(2*MSS, 14600)) per RFC 6928.
 func NewNewReno(mss uint32) *NewReno {
 	initialCWND := 10 * mss
-	if alt := max(2*mss, 4380); alt < initialCWND {
+	if alt := max(2*mss, 14600); alt < initialCWND {
 		initialCWND = alt
 	}
 	return &NewReno{

@@ -4,11 +4,11 @@ import "testing"
 
 func TestNewRenoInitialWindow(t *testing.T) {
 	nr := NewNewReno(1460)
-	// RFC 6928: initial cwnd = min(10*MSS, max(2*MSS, 4380))
-	// 10*1460 = 14600, max(2*1460, 4380) = max(2920, 4380) = 4380
-	// min(14600, 4380) = 4380
-	if nr.SendWindow() != 4380 {
-		t.Errorf("initial cwnd = %d, want 4380", nr.SendWindow())
+	// RFC 6928: initial cwnd = min(10*MSS, max(2*MSS, 14600))
+	// 10*1460 = 14600, max(2*1460, 14600) = 14600
+	// min(14600, 14600) = 14600
+	if nr.SendWindow() != 14600 {
+		t.Errorf("initial cwnd = %d, want 14600", nr.SendWindow())
 	}
 }
 

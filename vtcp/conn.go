@@ -20,9 +20,8 @@ type ConnConfig struct {
 	MSS        int
 
 	// RFC 7323
-	EnableWindowScaling bool
-	WindowScale         uint8 // 0-14
-	EnableTimestamps    bool
+	NoWindowScaling bool          // set true to disable window scaling (enabled by default)
+	EnableTimestamps bool
 
 	// RFC 2018
 	EnableSACK bool
@@ -87,9 +86,10 @@ type Conn struct {
 	mss     int
 
 	// Receive side
-	recvMu  sync.Mutex
-	recvBuf *RecvBuf
-	recvCond *sync.Cond
+	recvMu     sync.Mutex
+	recvBuf    *RecvBuf
+	recvCond   *sync.Cond
+	recvBufCap int
 
 	// Congestion control
 	cc CongestionController
@@ -142,6 +142,21 @@ type Conn struct {
 
 // NewConn creates a new TCP connection in the CLOSED state.
 func NewConn(cfg ConnConfig) *Conn {
+	recvBufCap := cfg.recvBufSize()
+
+	// Auto-compute window scale: smallest shift so that bufSize >> shift fits in 16 bits.
+	// RFC 7323: shift count 0-14.
+	var rcvWndShift uint8
+	if !cfg.NoWindowScaling {
+		for s := uint8(0); s <= 14; s++ {
+			if recvBufCap>>s <= 65535 {
+				rcvWndShift = s
+				break
+			}
+			rcvWndShift = s // keep going until it fits
+		}
+	}
+
 	c := &Conn{
 		localPort:  cfg.LocalPort,
 		remotePort: cfg.RemotePort,
@@ -154,11 +169,12 @@ func NewConn(cfg ConnConfig) *Conn {
 		cc:         NewNewReno(uint32(cfg.mss())),
 		rto:        NewRTOCalculator(),
 		lastRecv:   time.Now(),
+		recvBufCap: recvBufCap,
 		established: make(chan struct{}),
 		finRecvd:    make(chan struct{}),
 
 		// Options config (negotiated during handshake)
-		rcvWndShift: cfg.WindowScale,
+		rcvWndShift: rcvWndShift,
 		tsEnabled:   cfg.EnableTimestamps,
 		sackEnabled: cfg.EnableSACK,
 
@@ -230,15 +246,38 @@ func (c *Conn) makeSegment(flags uint8, payload []byte) Segment {
 }
 
 func (c *Conn) rcvWindow() uint16 {
-	// TODO: implement window scaling (shift rcvWndShift)
-	return DefaultWindowSize
+	// Advertise available receive buffer space, scaled by our shift factor.
+	c.recvMu.Lock()
+	used := 0
+	if c.recvBuf != nil {
+		used = c.recvBuf.Readable()
+	}
+	c.recvMu.Unlock()
+
+	avail := c.recvBufSize() - used
+	if avail < 0 {
+		avail = 0
+	}
+	if c.wscaleOK {
+		avail >>= c.rcvWndShift
+	}
+	if avail > 65535 {
+		avail = 65535
+	}
+	return uint16(avail)
+}
+
+func (c *Conn) recvBufSize() int {
+	if c.recvBufCap > 0 {
+		return c.recvBufCap
+	}
+	return DefaultRecvBuf
 }
 
 func (c *Conn) buildSYNOptions() []Option {
 	opts := []Option{MSSOption(uint16(c.mss))}
-	if c.rcvWndShift > 0 {
-		opts = append(opts, WScaleOption(c.rcvWndShift))
-	}
+	// Always offer window scaling (shift 0 is valid and means "I support it")
+	opts = append(opts, WScaleOption(c.rcvWndShift))
 	if c.sackEnabled {
 		opts = append(opts, SACKPermOption())
 	}
@@ -352,12 +391,12 @@ func (c *Conn) AcceptSYN(syn Segment) [][]byte {
 }
 
 func (c *Conn) negotiateOptions(remoteOpts []Option) {
-	// Window scaling
-	if c.rcvWndShift > 0 {
-		if ws := GetWScale(remoteOpts); ws >= 0 {
-			c.sndWndShift = uint8(ws)
-			c.wscaleOK = true
-		}
+	// Window scaling: enabled if both sides offered WScale in their SYN.
+	// We always offer it unless NoWindowScaling was set (rcvWndShift stays 0
+	// but we still send WScale(0) in the SYN options).
+	if ws := GetWScale(remoteOpts); ws >= 0 {
+		c.sndWndShift = uint8(ws)
+		c.wscaleOK = true
 	}
 	// SACK
 	if c.sackEnabled && HasSACKPerm(remoteOpts) {

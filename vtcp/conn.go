@@ -125,6 +125,10 @@ type Conn struct {
 	sackEnabled bool
 	sackOK      bool // both sides negotiated SACK
 
+	// Persist timer (RFC 9293 §3.7.7 — zero-window probing)
+	persistTimer   *time.Timer
+	persistBackoff time.Duration
+
 	// Keepalive
 	keepalive      bool
 	keepaliveIdle  time.Duration
@@ -318,7 +322,7 @@ func (c *Conn) Connect(ctx context.Context) error {
 	// Initialize sequence number
 	iss := randUint32()
 	c.sendBuf = NewSendBuf(c.sendBufSize(), iss)
-	c.recvBuf = NewRecvBuf(0) // RCV.NXT set when SYN-ACK arrives
+	c.recvBuf = NewRecvBuf(0, c.recvBufCap) // RCV.NXT set when SYN-ACK arrives
 
 	c.state = StateSynSent
 
@@ -380,7 +384,7 @@ func (c *Conn) AcceptSYN(syn Segment) [][]byte {
 	// Initialize sequence numbers
 	iss := randUint32()
 	c.sendBuf = NewSendBuf(DefaultSendBuf, iss)
-	c.recvBuf = NewRecvBuf(syn.Seq + 1) // SYN consumed 1 seq
+	c.recvBuf = NewRecvBuf(syn.Seq+1, c.recvBufCap) // SYN consumed 1 seq
 
 	c.state = StateSynReceived
 
@@ -396,6 +400,11 @@ func (c *Conn) AcceptSYN(syn Segment) [][]byte {
 	}
 	c.queueSeg(synack)
 	c.sendBuf.AdvanceSent(1) // SYN consumes 1 seq
+
+	// Fix 7A: buffer any data in the SYN (RFC 9293 §3.10.7.2)
+	if len(syn.Payload) > 0 {
+		c.recvBuf.Insert(syn.Seq+1, syn.Payload)
+	}
 
 	c.startRTO()
 
@@ -422,9 +431,73 @@ func (c *Conn) negotiateOptions(remoteOpts []Option) {
 	}
 }
 
+// --- Segment validation (RFC 9293 §3.10.7.4) ---
+
+// segmentAcceptable implements RFC 9293 Table 5.
+// Must hold c.mu. Requires c.recvBuf to be initialized.
+func (c *Conn) segmentAcceptable(seg Segment) bool {
+	if c.recvBuf == nil {
+		return true // no recv state yet (pre-handshake)
+	}
+	c.recvMu.Lock()
+	rcvNxt := c.recvBuf.Nxt()
+	c.recvMu.Unlock()
+	// Use the full buffer capacity as the acceptance window.
+	// The advertised window (rcvWindow) controls sender rate;
+	// the acceptability window should be as large as possible
+	// to avoid dropping useful out-of-order data.
+	rcvWnd := uint32(c.recvBufCap)
+	if rcvWnd == 0 {
+		rcvWnd = DefaultRecvBuf
+	}
+	segLen := seg.SegLen()
+
+	if segLen == 0 {
+		if rcvWnd == 0 {
+			return seg.Seq == rcvNxt
+		}
+		return SeqInRange(seg.Seq, rcvNxt, rcvNxt+rcvWnd)
+	}
+	// segLen > 0
+	if rcvWnd == 0 {
+		return false // not acceptable
+	}
+	segEnd := seg.Seq + segLen - 1
+	return SeqInRange(seg.Seq, rcvNxt, rcvNxt+rcvWnd) ||
+		SeqInRange(segEnd, rcvNxt, rcvNxt+rcvWnd)
+}
+
+// validateRST implements RFC 9293 §3.10.7.4 second check + RFC 5961.
+// Returns true if the RST should be accepted. Must hold c.mu.
+func (c *Conn) validateRST(seg Segment) (accept bool, challengeACK bool) {
+	switch c.state {
+	case StateSynSent:
+		// In SYN-SENT: RST valid only if ACK present and SEG.ACK == SND.NXT
+		if seg.HasFlag(FlagACK) && seg.Ack == c.sendBuf.NXT() {
+			return true, false
+		}
+		return false, false
+	default:
+		// RFC 5961 §3.2: RST is valid only if SEG.SEQ == RCV.NXT exactly.
+		// If in-window but not exact, send challenge ACK.
+		if c.recvBuf == nil {
+			return true, false
+		}
+		rcvNxt := c.recvBuf.Nxt()
+		if seg.Seq == rcvNxt {
+			return true, false
+		}
+		rcvWnd := c.recvBuf.Window()
+		if SeqInRange(seg.Seq, rcvNxt, rcvNxt+rcvWnd) {
+			return false, true // in-window but not exact → challenge ACK
+		}
+		return false, false // out of window → ignore
+	}
+}
+
 // --- Network-side I/O ---
 
-// HandleSegment processes an incoming TCP segment.
+// HandleSegment processes an incoming TCP segment following RFC 9293 §3.10.7.4.
 // Returns packets to send in response. The caller MUST send these.
 func (c *Conn) HandleSegment(seg Segment) [][]byte {
 	c.mu.Lock()
@@ -432,105 +505,250 @@ func (c *Conn) HandleSegment(seg Segment) [][]byte {
 	c.lastRecv = time.Now()
 	c.keepaliveSent = 0
 
-	// RST: tear down immediately
-	if seg.HasFlag(FlagRST) {
-		c.state = StateClosed
-		c.closed.Store(true)
-		c.stopRTO()
-		c.stopKeepalive()
-		c.mu.Unlock()
-		c.recvCond.Broadcast()
-		c.sendCond.Broadcast()
-		c.safeCloseEstablished()
-		c.safeCloseFinRecvd()
-		return nil
-	}
-
 	var pkts [][]byte
 
 	switch c.state {
+	case StateClosed:
+		// Fix 7B: RST for segments arriving at CLOSED (RFC 9293 §3.10.7.1)
+		pkts = c.handleClosed(seg)
+
 	case StateSynSent:
+		// SYN-SENT has its own processing order (RFC 9293 §3.10.7.2)
 		pkts = c.handleSynSent(seg)
-	case StateSynReceived:
-		pkts = c.handleSynReceived(seg)
-	case StateEstablished:
-		pkts = c.handleEstablished(seg)
-	case StateFinWait1:
-		pkts = c.handleFinWait1(seg)
-	case StateFinWait2:
-		pkts = c.handleFinWait2(seg)
-	case StateCloseWait:
-		pkts = c.handleCloseWait(seg)
-	case StateClosing:
-		pkts = c.handleClosing(seg)
-	case StateLastAck:
-		pkts = c.handleLastAck(seg)
-	case StateTimeWait:
-		// In TIME-WAIT, respond to any segment with ACK
-		c.queueACK()
-		pkts = c.drainOutgoing()
+
+	case StateSynReceived, StateEstablished, StateFinWait1, StateFinWait2,
+		StateCloseWait, StateClosing, StateLastAck, StateTimeWait:
+		// All synchronized states follow RFC 9293 §3.10.7.4 check order:
+		// 1. Sequence number check
+		// 2. RST check
+		// 3. (Security — skipped)
+		// 4. SYN check
+		// 5. ACK check
+		// 6-8. Process data, FIN, etc.
+		pkts = c.handleSynchronized(seg)
 	}
 
 	c.mu.Unlock()
 	return pkts
 }
 
+// handleClosed generates RST for segments arriving at a CLOSED connection.
+// RFC 9293 §3.10.7.1.
+func (c *Conn) handleClosed(seg Segment) [][]byte {
+	if seg.HasFlag(FlagRST) {
+		return nil // ignore RST to CLOSED
+	}
+	if seg.HasFlag(FlagACK) {
+		// RST with SEQ = SEG.ACK
+		rst := Segment{
+			SrcPort: c.localPort,
+			DstPort: c.remotePort,
+			Seq:     seg.Ack,
+			Flags:   FlagRST,
+		}
+		c.queueSeg(rst)
+	} else {
+		// RST+ACK with SEQ=0, ACK = SEG.SEQ + SEG.LEN
+		rst := Segment{
+			SrcPort: c.localPort,
+			DstPort: c.remotePort,
+			Seq:     0,
+			Ack:     seg.Seq + seg.SegLen(),
+			Flags:   FlagRST | FlagACK,
+		}
+		c.queueSeg(rst)
+	}
+	return c.drainOutgoing()
+}
+
+// handleSynchronized implements RFC 9293 §3.10.7.4 for all synchronized states.
+func (c *Conn) handleSynchronized(seg Segment) [][]byte {
+	// --- First check: sequence number (RFC 9293 §3.10.7.4 step 1) ---
+	if !c.segmentAcceptable(seg) {
+		// Special case: in SYN-RECEIVED during simultaneous open, the peer's
+		// SYN-ACK retransmits the SYN (SEQ == RCV.NXT-1). Accept if ACK is valid.
+		synRcvdOK := c.state == StateSynReceived && seg.HasFlag(FlagSYN) &&
+			seg.HasFlag(FlagACK) && seg.Ack == c.sendBuf.NXT()
+		if !synRcvdOK {
+			if !seg.HasFlag(FlagRST) {
+				c.queueACK()
+			}
+			return c.drainOutgoing()
+		}
+	}
+
+	// --- Second check: RST (RFC 9293 §3.10.7.4 step 2 + RFC 5961) ---
+	if seg.HasFlag(FlagRST) {
+		accept, challenge := c.validateRST(seg)
+		if challenge {
+			c.queueACK() // challenge ACK per RFC 5961
+			return c.drainOutgoing()
+		}
+		if !accept {
+			return c.drainOutgoing() // silently ignore
+		}
+		// Valid RST — tear down
+		c.state = StateClosed
+		c.closed.Store(true)
+		c.stopRTO()
+		c.stopPersist()
+		c.stopKeepalive()
+		c.stopPersist()
+		c.recvCond.Broadcast()
+		c.sendCond.Broadcast()
+		c.safeCloseEstablished()
+		c.safeCloseFinRecvd()
+		return c.drainOutgoing()
+	}
+
+	// --- Third check: security/precedence — skipped ---
+
+	// --- Fourth check: SYN (RFC 9293 §3.10.7.4 step 4 + RFC 5961 §4) ---
+	if seg.HasFlag(FlagSYN) && c.state != StateSynReceived {
+		// SYN in a synchronized state (other than SYN-RECEIVED) is an error.
+		// Per RFC 5961 §4, send a challenge ACK (mitigates blind SYN attacks).
+		// SYN-RECEIVED is exempt because simultaneous open sends SYN-ACK here.
+		c.queueACK()
+		return c.drainOutgoing()
+	}
+
+	// --- Fifth check: ACK required (RFC 9293 §3.10.7.4 step 5) ---
+	if !seg.HasFlag(FlagACK) {
+		// Drop segment without ACK (except RST, already handled above)
+		return c.drainOutgoing()
+	}
+
+	// --- Dispatch to per-state handler for ACK/data/FIN processing ---
+	switch c.state {
+	case StateSynReceived:
+		return c.handleSynReceived(seg)
+	case StateEstablished:
+		return c.handleEstablished(seg)
+	case StateFinWait1:
+		return c.handleFinWait1(seg)
+	case StateFinWait2:
+		return c.handleFinWait2(seg)
+	case StateCloseWait:
+		return c.handleCloseWait(seg)
+	case StateClosing:
+		return c.handleClosing(seg)
+	case StateLastAck:
+		return c.handleLastAck(seg)
+	case StateTimeWait:
+		c.queueACK()
+		return c.drainOutgoing()
+	}
+	return c.drainOutgoing()
+}
+
 // --- State handlers ---
 
+// handleSynSent implements RFC 9293 §3.10.7.2 (SYN-SENT state processing).
+// Handles SYN-ACK (normal), bare SYN (simultaneous open), and RST.
 func (c *Conn) handleSynSent(seg Segment) [][]byte {
-	// Expect SYN-ACK
-	if !seg.HasFlag(FlagSYN) || !seg.HasFlag(FlagACK) {
-		return c.drainOutgoing()
+	// RFC 9293 §3.10.7.2 step 1: check ACK
+	if seg.HasFlag(FlagACK) {
+		if SeqBeforeEq(seg.Ack, c.sendBuf.UNA()) || SeqAfter(seg.Ack, c.sendBuf.NXT()) {
+			// Unacceptable ACK
+			if !seg.HasFlag(FlagRST) {
+				// Send RST with SEQ = SEG.ACK
+				rst := Segment{SrcPort: c.localPort, DstPort: c.remotePort, Seq: seg.Ack, Flags: FlagRST}
+				c.queueSeg(rst)
+			}
+			return c.drainOutgoing()
+		}
 	}
-	if seg.Ack != c.sendBuf.NXT() {
+
+	// RFC 9293 §3.10.7.2 step 2: check RST
+	if seg.HasFlag(FlagRST) {
+		if seg.HasFlag(FlagACK) {
+			// ACK was acceptable (checked above), RST is valid
+			c.state = StateClosed
+			c.closed.Store(true)
+			c.stopRTO()
+			c.safeCloseEstablished()
+			c.safeCloseFinRecvd()
+		}
+		// No ACK → ignore RST
 		return c.drainOutgoing()
 	}
 
-	// ACK our SYN
-	c.sendBuf.Acknowledge(seg.Ack)
-	c.retries = 0
-	c.stopRTO()
+	// RFC 9293 §3.10.7.2 step 3: check SYN
+	if !seg.HasFlag(FlagSYN) {
+		return c.drainOutgoing() // no SYN → drop
+	}
 
-	// Parse options from SYN-ACK
+	// SYN is set. Negotiate options.
 	if mss := GetMSS(seg.Options); mss > 0 && int(mss) < c.mss {
 		c.mss = int(mss)
 	}
 	c.negotiateOptions(seg.Options)
 
-	// Set receive state
-	c.recvBuf = NewRecvBuf(seg.Seq + 1) // SYN consumes 1 seq
-	c.sndWnd = uint32(seg.Window) << c.sndWndShift
-	c.cc = NewHighSpeed(uint32(c.mss)) // reinit with negotiated MSS
+	if seg.HasFlag(FlagACK) {
+		// SYN-ACK: normal active open completion
+		c.sendBuf.Acknowledge(seg.Ack)
+		c.retries = 0
+		c.stopRTO()
 
-	// RTT sample
-	c.rto.AckReceived(seg.Ack)
+		c.recvBuf = NewRecvBuf(seg.Seq+1, c.recvBufCap)
+		c.sndWnd = uint32(seg.Window) << c.sndWndShift
+		c.cc = NewHighSpeed(uint32(c.mss))
+		c.rto.AckReceived(seg.Ack)
+		c.state = StateEstablished
 
-	c.state = StateEstablished
+		// Fix 7A: buffer any data in the SYN-ACK
+		if len(seg.Payload) > 0 {
+			c.recvMu.Lock()
+			c.recvBuf.Insert(seg.Seq+1, seg.Payload)
+			c.recvMu.Unlock()
+			c.recvCond.Broadcast()
+		}
 
-	// Send ACK
-	c.queueACK()
-
-	// Flush any queued app data
-	c.flushSendQueue()
-
-	// Start keepalive if configured
-	if c.keepalive {
-		c.startKeepalive()
+		c.queueACK()
+		c.flushSendQueue()
+		if c.keepalive {
+			c.startKeepalive()
+		}
+		pkts := c.drainOutgoing()
+		c.safeCloseEstablished()
+		return pkts
 	}
 
-	pkts := c.drainOutgoing()
+	// Fix 5: Bare SYN without ACK — simultaneous open (RFC 9293 §3.10.7.2)
+	c.recvBuf = NewRecvBuf(seg.Seq+1, c.recvBufCap)
+	c.sndWnd = uint32(seg.Window) << c.sndWndShift
+	c.state = StateSynReceived
+	c.retries = 0
+	c.stopRTO()
 
-	// Signal establishment (outside lock via deferred close)
-	c.safeCloseEstablished()
+	// Buffer any data in the SYN
+	if len(seg.Payload) > 0 {
+		c.recvMu.Lock()
+		c.recvBuf.Insert(seg.Seq+1, seg.Payload)
+		c.recvMu.Unlock()
+	}
 
-	return pkts
+	// Send SYN-ACK (our ISN is already in sendBuf.UNA)
+	synack := Segment{
+		SrcPort: c.localPort,
+		DstPort: c.remotePort,
+		Seq:     c.sendBuf.UNA(),
+		Ack:     c.recvBuf.Nxt(),
+		Flags:   FlagSYN | FlagACK,
+		Window:  c.rcvWindow(),
+		Options: c.buildSYNOptions(),
+	}
+	c.queueSeg(synack)
+	c.startRTO()
+	return c.drainOutgoing()
 }
 
 func (c *Conn) handleSynReceived(seg Segment) [][]byte {
-	if !seg.HasFlag(FlagACK) {
-		return c.drainOutgoing()
-	}
+	// ACK flag is guaranteed by handleSynchronized (fifth check).
 	if seg.Ack != c.sendBuf.NXT() {
+		// Bad ACK: send RST with SEQ = SEG.ACK (RFC 9293 §3.10.7.4)
+		rst := Segment{SrcPort: c.localPort, DstPort: c.remotePort, Seq: seg.Ack, Flags: FlagRST}
+		c.queueSeg(rst)
 		return c.drainOutgoing()
 	}
 
@@ -647,6 +865,7 @@ func (c *Conn) handleLastAck(seg Segment) [][]byte {
 		c.closed.Store(true)
 		c.stopRTO()
 		c.stopKeepalive()
+		c.stopPersist()
 		c.recvCond.Broadcast()
 		c.sendCond.Broadcast()
 	}
@@ -681,6 +900,11 @@ func (c *Conn) processACK(ack uint32) {
 	acked := c.sendBuf.Acknowledge(ack)
 	c.retries = 0
 	c.cc.OnACK(acked)
+
+	// Stop persist timer if window has opened
+	if c.sndWnd > 0 && c.persistTimer != nil {
+		c.stopPersist()
+	}
 
 	// RTT sample (Karn's: only for non-retransmitted)
 	c.rto.AckReceived(ack)
@@ -759,6 +983,12 @@ func (c *Conn) flushSendQueue() {
 			c.startRTO()
 		}
 	}
+
+	// Fix 6: Start persist timer if window is zero and data is pending
+	// (RFC 9293 §3.7.7 — zero-window probing)
+	if c.sendBuf.Pending() > 0 && c.sndWnd == 0 && c.persistTimer == nil {
+		c.startPersist()
+	}
 }
 
 func (c *Conn) queueACK() {
@@ -788,6 +1018,73 @@ func (c *Conn) stopRTO() {
 	}
 }
 
+// --- Persist timer (RFC 9293 §3.7.7) ---
+
+func (c *Conn) startPersist() {
+	c.stopPersist()
+	if c.persistBackoff == 0 {
+		c.persistBackoff = c.rto.RTO()
+	}
+	c.persistTimer = time.AfterFunc(c.persistBackoff, c.onPersistTimeout)
+}
+
+func (c *Conn) stopPersist() {
+	if c.persistTimer != nil {
+		c.persistTimer.Stop()
+		c.persistTimer = nil
+	}
+	c.persistBackoff = 0
+}
+
+func (c *Conn) onPersistTimeout() {
+	c.mu.Lock()
+	if c.closed.Load() || c.state == StateClosed {
+		c.mu.Unlock()
+		return
+	}
+
+	// If window opened, stop persisting and flush normally
+	if c.sndWnd > 0 {
+		c.stopPersist()
+		c.flushSendQueue()
+		pkts := c.drainOutgoing()
+		c.mu.Unlock()
+		c.flushPackets(pkts)
+		return
+	}
+
+	// Window still zero: send a 1-byte window probe
+	if c.sendBuf.Pending() > 0 {
+		data := c.sendBuf.PeekUnsent(1)
+		if len(data) > 0 {
+			seg := Segment{
+				SrcPort: c.localPort,
+				DstPort: c.remotePort,
+				Seq:     c.sendBuf.NXT(),
+				Ack:     c.recvBuf.Nxt(),
+				Flags:   FlagACK,
+				Window:  c.rcvWindow(),
+				Payload: data,
+			}
+			c.queueSeg(seg)
+			c.sendBuf.AdvanceSent(len(data))
+		}
+	}
+
+	// Exponential backoff, capped at 60s
+	c.persistBackoff *= 2
+	if c.persistBackoff > MaxRTO {
+		c.persistBackoff = MaxRTO
+	}
+	c.persistTimer = time.AfterFunc(c.persistBackoff, c.onPersistTimeout)
+
+	pkts := c.drainOutgoing()
+	c.mu.Unlock()
+	c.flushPackets(pkts)
+}
+
+// --- RTO timer ---
+
 func (c *Conn) onRTOTimeout() {
 	c.mu.Lock()
 	if c.closed.Load() || c.state == StateClosed {
@@ -801,6 +1098,7 @@ func (c *Conn) onRTOTimeout() {
 		c.closed.Store(true)
 		c.stopRTO()
 		c.stopKeepalive()
+		c.stopPersist()
 		c.mu.Unlock()
 		c.recvCond.Broadcast()
 		c.sendCond.Broadcast()
@@ -858,6 +1156,7 @@ func (c *Conn) startTimeWait() {
 		c.state = StateClosed
 		c.closed.Store(true)
 		c.stopKeepalive()
+		c.stopPersist()
 		c.mu.Unlock()
 		c.recvCond.Broadcast()
 		c.sendCond.Broadcast()
@@ -868,6 +1167,7 @@ func (c *Conn) startTimeWait() {
 
 func (c *Conn) startKeepalive() {
 	c.stopKeepalive()
+		c.stopPersist()
 	c.keepaliveTimer = time.AfterFunc(c.keepaliveIntv, c.onKeepalive)
 }
 
@@ -1011,11 +1311,13 @@ func (c *Conn) Close() error {
 		c.closed.Store(true)
 		c.stopRTO()
 		c.stopKeepalive()
+		c.stopPersist()
 	default:
 		c.closed.Store(true)
 		c.state = StateClosed
 		c.stopRTO()
 		c.stopKeepalive()
+		c.stopPersist()
 	}
 	c.mu.Unlock()
 
@@ -1050,6 +1352,7 @@ func (c *Conn) Abort() [][]byte {
 	c.closed.Store(true)
 	c.stopRTO()
 	c.stopKeepalive()
+		c.stopPersist()
 
 	var pkts [][]byte
 	if wasEstablished && c.sendBuf != nil && c.recvBuf != nil {

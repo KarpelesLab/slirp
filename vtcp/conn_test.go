@@ -306,8 +306,8 @@ func TestConnRST(t *testing.T) {
 	synack, _ := ParseSegment(pkts[0])
 	server.HandleSegment(Segment{SrcPort: 50000, DstPort: 9000, Seq: 1001, Ack: synack.Seq + 1, Flags: FlagACK, Window: 65535})
 
-	// Send RST
-	server.HandleSegment(Segment{SrcPort: 50000, DstPort: 9000, Flags: FlagRST})
+	// Send RST with correct SEQ (must == RCV.NXT per RFC 5961)
+	server.HandleSegment(Segment{SrcPort: 50000, DstPort: 9000, Seq: 1001, Flags: FlagRST})
 
 	if server.State() != StateClosed {
 		t.Errorf("state = %v, want CLOSED", server.State())
@@ -461,5 +461,263 @@ func TestConnStateString(t *testing.T) {
 	}
 	if StateEstablished.String() != "ESTABLISHED" {
 		t.Errorf("StateEstablished = %q", StateEstablished.String())
+	}
+}
+
+// --- RFC 9293 Compliance Tests ---
+
+// TestRFC9293_SequenceValidation tests that out-of-window segments are rejected with ACK.
+func TestRFC9293_SequenceValidation(t *testing.T) {
+	server := NewConn(ConnConfig{
+		LocalPort: 9000, RemotePort: 50000,
+		Writer: func(seg []byte) error { return nil },
+		MSS: 1460, RecvBufSize: 4096,
+	})
+
+	syn := Segment{SrcPort: 50000, DstPort: 9000, Seq: 1000, Flags: FlagSYN, Window: 65535}
+	pkts := server.AcceptSYN(syn)
+	synack, _ := ParseSegment(pkts[0])
+	server.HandleSegment(Segment{SrcPort: 50000, DstPort: 9000, Seq: 1001, Ack: synack.Seq + 1, Flags: FlagACK, Window: 65535})
+
+	// Send segment with seq far beyond even the max recv buffer
+	respPkts := server.HandleSegment(Segment{
+		SrcPort: 50000, DstPort: 9000,
+		Seq: 1001 + 2000000, // way beyond 1MB window
+		Ack: synack.Seq + 1, Flags: FlagACK | FlagPSH,
+		Window: 65535, Payload: []byte("out of window"),
+	})
+
+	if len(respPkts) == 0 {
+		t.Fatal("expected ACK response to out-of-window segment")
+	}
+	resp, _ := ParseSegment(respPkts[0])
+	if !resp.HasFlag(FlagACK) {
+		t.Errorf("response should be ACK, got flags=0x%02x", resp.Flags)
+	}
+}
+
+// TestRFC9293_RSTValidation tests that RST with wrong seq is rejected (RFC 5961).
+func TestRFC9293_RSTValidation(t *testing.T) {
+	server := NewConn(ConnConfig{
+		LocalPort: 9000, RemotePort: 50000,
+		Writer: func(seg []byte) error { return nil },
+		MSS: 1460,
+	})
+
+	syn := Segment{SrcPort: 50000, DstPort: 9000, Seq: 1000, Flags: FlagSYN, Window: 65535}
+	pkts := server.AcceptSYN(syn)
+	synack, _ := ParseSegment(pkts[0])
+	server.HandleSegment(Segment{SrcPort: 50000, DstPort: 9000, Seq: 1001, Ack: synack.Seq + 1, Flags: FlagACK, Window: 65535})
+
+	// RST with wrong seq (not RCV.NXT) — should be ignored
+	server.HandleSegment(Segment{SrcPort: 50000, DstPort: 9000, Seq: 9999, Flags: FlagRST})
+	if server.State() != StateEstablished {
+		t.Errorf("RST with wrong seq should be ignored, state = %v", server.State())
+	}
+
+	// RST with correct seq (== RCV.NXT) — should close
+	server.HandleSegment(Segment{SrcPort: 50000, DstPort: 9000, Seq: 1001, Flags: FlagRST})
+	if server.State() != StateClosed {
+		t.Errorf("RST with correct seq should close, state = %v", server.State())
+	}
+}
+
+// TestRFC9293_SYNInEstablished tests that SYN in ESTABLISHED triggers challenge ACK.
+func TestRFC9293_SYNInEstablished(t *testing.T) {
+	server := NewConn(ConnConfig{
+		LocalPort: 9000, RemotePort: 50000,
+		Writer: func(seg []byte) error { return nil },
+		MSS: 1460,
+	})
+
+	syn := Segment{SrcPort: 50000, DstPort: 9000, Seq: 1000, Flags: FlagSYN, Window: 65535}
+	pkts := server.AcceptSYN(syn)
+	synack, _ := ParseSegment(pkts[0])
+	server.HandleSegment(Segment{SrcPort: 50000, DstPort: 9000, Seq: 1001, Ack: synack.Seq + 1, Flags: FlagACK, Window: 65535})
+
+	// SYN in ESTABLISHED — should get challenge ACK (RFC 5961 §4)
+	respPkts := server.HandleSegment(Segment{SrcPort: 50000, DstPort: 9000, Seq: 1001, Flags: FlagSYN | FlagACK, Ack: synack.Seq + 1, Window: 65535})
+
+	if server.State() != StateEstablished {
+		t.Errorf("SYN in ESTABLISHED should NOT close, state = %v", server.State())
+	}
+	if len(respPkts) == 0 {
+		t.Fatal("expected challenge ACK for SYN in ESTABLISHED")
+	}
+	resp, _ := ParseSegment(respPkts[0])
+	if !resp.HasFlag(FlagACK) {
+		t.Errorf("response should be ACK, got flags=0x%02x", resp.Flags)
+	}
+}
+
+// TestRFC9293_ACKRequired tests that segments without ACK are dropped.
+func TestRFC9293_ACKRequired(t *testing.T) {
+	server := NewConn(ConnConfig{
+		LocalPort: 9000, RemotePort: 50000,
+		Writer: func(seg []byte) error { return nil },
+		MSS: 1460,
+	})
+
+	syn := Segment{SrcPort: 50000, DstPort: 9000, Seq: 1000, Flags: FlagSYN, Window: 65535}
+	pkts := server.AcceptSYN(syn)
+	synack, _ := ParseSegment(pkts[0])
+	server.HandleSegment(Segment{SrcPort: 50000, DstPort: 9000, Seq: 1001, Ack: synack.Seq + 1, Flags: FlagACK, Window: 65535})
+
+	// Data segment WITHOUT ACK flag — should be dropped
+	server.HandleSegment(Segment{
+		SrcPort: 50000, DstPort: 9000,
+		Seq: 1001, Flags: FlagPSH, // no ACK!
+		Window: 65535, Payload: []byte("no ack"),
+	})
+
+	// Data should not have been delivered
+	buf := make([]byte, 100)
+	server.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	_, err := server.Read(buf)
+	if err == nil {
+		t.Error("expected timeout — segment without ACK should be dropped")
+	}
+}
+
+// TestRFC9293_RSTForClosed tests RST generation for segments to CLOSED conn.
+func TestRFC9293_RSTForClosed(t *testing.T) {
+	server := NewConn(ConnConfig{
+		LocalPort: 9000, RemotePort: 50000,
+		Writer: func(seg []byte) error { return nil },
+	})
+
+	// Segment with ACK → RST with SEQ=SEG.ACK
+	respPkts := server.HandleSegment(Segment{SrcPort: 50000, DstPort: 9000, Seq: 100, Ack: 200, Flags: FlagACK})
+	if len(respPkts) == 0 {
+		t.Fatal("expected RST for segment to CLOSED")
+	}
+	rst, _ := ParseSegment(respPkts[0])
+	if !rst.HasFlag(FlagRST) {
+		t.Fatalf("expected RST, got flags=0x%02x", rst.Flags)
+	}
+	if rst.Seq != 200 {
+		t.Errorf("RST seq = %d, want 200 (SEG.ACK)", rst.Seq)
+	}
+
+	// Segment without ACK → RST+ACK with SEQ=0
+	respPkts = server.HandleSegment(Segment{SrcPort: 50000, DstPort: 9000, Seq: 100, Flags: FlagSYN})
+	if len(respPkts) == 0 {
+		t.Fatal("expected RST for SYN to CLOSED")
+	}
+	rst, _ = ParseSegment(respPkts[0])
+	if !rst.HasFlag(FlagRST) {
+		t.Fatalf("expected RST, got flags=0x%02x", rst.Flags)
+	}
+	if rst.Seq != 0 {
+		t.Errorf("RST seq = %d, want 0", rst.Seq)
+	}
+	if !rst.HasFlag(FlagACK) {
+		t.Error("RST should have ACK flag")
+	}
+}
+
+// TestRFC9293_SimultaneousOpen tests that bare SYN in SYN-SENT is handled.
+func TestRFC9293_SimultaneousOpen(t *testing.T) {
+	var sentA, sentB []Segment
+
+	connA := NewConn(ConnConfig{
+		LocalPort: 50000, RemotePort: 60000,
+		Writer: func(seg []byte) error {
+			p, _ := ParseSegment(seg)
+			sentA = append(sentA, p)
+			return nil
+		},
+		MSS: 1460,
+	})
+	connB := NewConn(ConnConfig{
+		LocalPort: 60000, RemotePort: 50000,
+		Writer: func(seg []byte) error {
+			p, _ := ParseSegment(seg)
+			sentB = append(sentB, p)
+			return nil
+		},
+		MSS: 1460,
+	})
+
+	// Both sides send SYN (via Connect-like setup)
+	// Manually set both sides to SYN-SENT with their ISNs
+	connA.mu.Lock()
+	issA := randUint32()
+	connA.sendBuf = NewSendBuf(DefaultSendBuf, issA)
+	connA.recvBuf = NewRecvBuf(0, DefaultRecvBuf)
+	connA.state = StateSynSent
+	connA.sendBuf.AdvanceSent(1) // SYN consumed
+	connA.mu.Unlock()
+
+	connB.mu.Lock()
+	issB := randUint32()
+	connB.sendBuf = NewSendBuf(DefaultSendBuf, issB)
+	connB.recvBuf = NewRecvBuf(0, DefaultRecvBuf)
+	connB.state = StateSynSent
+	connB.sendBuf.AdvanceSent(1) // SYN consumed
+	connB.mu.Unlock()
+
+	// Build the SYN segments (not queued in outgoing, just for exchange)
+	synA := Segment{SrcPort: 50000, DstPort: 60000, Seq: issA, Flags: FlagSYN, Window: 65535}
+	synB := Segment{SrcPort: 60000, DstPort: 50000, Seq: issB, Flags: FlagSYN, Window: 65535}
+
+	// A receives B's SYN (simultaneous open)
+	respA := connA.HandleSegment(synB)
+	if connA.State() != StateSynReceived {
+		t.Errorf("A should be SYN-RECEIVED after bare SYN, got %v", connA.State())
+	}
+	if len(respA) == 0 {
+		t.Fatal("A should send SYN-ACK")
+	}
+	synackA, _ := ParseSegment(respA[0])
+	if !synackA.HasFlag(FlagSYN) || !synackA.HasFlag(FlagACK) {
+		t.Errorf("A's response should be SYN-ACK, got 0x%02x", synackA.Flags)
+	}
+
+	// B receives A's SYN (simultaneous open)
+	respB := connB.HandleSegment(synA)
+	if connB.State() != StateSynReceived {
+		t.Errorf("B should be SYN-RECEIVED after bare SYN, got %v", connB.State())
+	}
+	synackB, _ := ParseSegment(respB[0])
+
+	// A receives B's SYN-ACK → ESTABLISHED
+	connA.HandleSegment(synackB)
+	if connA.State() != StateEstablished {
+		t.Errorf("A should be ESTABLISHED after SYN-ACK, got %v", connA.State())
+	}
+
+	// B receives A's SYN-ACK → ESTABLISHED
+	connB.HandleSegment(synackA)
+	if connB.State() != StateEstablished {
+		t.Errorf("B should be ESTABLISHED after SYN-ACK, got %v", connB.State())
+	}
+}
+
+// TestRFC9293_DataInSYN tests that payload in SYN is buffered.
+func TestRFC9293_DataInSYN(t *testing.T) {
+	server := NewConn(ConnConfig{
+		LocalPort: 9000, RemotePort: 50000,
+		Writer: func(seg []byte) error { return nil },
+		MSS: 1460,
+	})
+
+	// SYN with payload data
+	syn := Segment{SrcPort: 50000, DstPort: 9000, Seq: 1000, Flags: FlagSYN, Window: 65535, Payload: []byte("early")}
+	pkts := server.AcceptSYN(syn)
+	synack, _ := ParseSegment(pkts[0])
+
+	// Complete handshake
+	server.HandleSegment(Segment{SrcPort: 50000, DstPort: 9000, Seq: 1006, Ack: synack.Seq + 1, Flags: FlagACK, Window: 65535})
+
+	// Data from SYN should be readable
+	buf := make([]byte, 100)
+	server.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	n, err := server.Read(buf)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if string(buf[:n]) != "early" {
+		t.Errorf("Read = %q, want %q", buf[:n], "early")
 	}
 }

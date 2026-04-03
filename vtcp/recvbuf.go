@@ -4,9 +4,10 @@ package vtcp
 // and out-of-order segments. It maintains a SACK scoreboard for reporting
 // non-contiguous received blocks.
 type RecvBuf struct {
-	buf []byte     // contiguous in-order data ready for Read
-	nxt uint32     // RCV.NXT: next expected sequence number
-	ooo []oooEntry // out-of-order segments, sorted by start seq
+	buf        []byte     // contiguous in-order data ready for Read
+	nxt        uint32     // RCV.NXT: next expected sequence number
+	ooo        []oooEntry // out-of-order segments, sorted by start seq
+	windowSize int        // maximum receive window; 0 = unlimited
 }
 
 type oooEntry struct {
@@ -14,14 +15,33 @@ type oooEntry struct {
 	data []byte
 }
 
-// NewRecvBuf creates a receive buffer with the given initial sequence number.
-func NewRecvBuf(initialNxt uint32) *RecvBuf {
-	return &RecvBuf{nxt: initialNxt}
+// NewRecvBuf creates a receive buffer with the given initial sequence number
+// and maximum window size. Data beyond nxt+windowSize is rejected.
+func NewRecvBuf(initialNxt uint32, windowSize int) *RecvBuf {
+	return &RecvBuf{nxt: initialNxt, windowSize: windowSize}
+}
+
+// Window returns the current receive window (available space).
+func (r *RecvBuf) Window() uint32 {
+	if r.windowSize <= 0 {
+		return 65535 // unlimited
+	}
+	used := len(r.buf)
+	// Also count OOO data as consuming window space
+	for _, e := range r.ooo {
+		used += len(e.data)
+	}
+	avail := r.windowSize - used
+	if avail < 0 {
+		return 0
+	}
+	return uint32(avail)
 }
 
 // Insert adds a segment's payload at the given sequence number.
 // Returns the number of new contiguous bytes added (available for Read).
 // Out-of-order segments are buffered for later reassembly.
+// Data beyond the receive window (nxt + windowSize) is trimmed.
 func (r *RecvBuf) Insert(seq uint32, data []byte) int {
 	if len(data) == 0 {
 		return 0
@@ -38,6 +58,20 @@ func (r *RecvBuf) Insert(seq uint32, data []byte) int {
 		data = data[overlap:]
 		seq = r.nxt
 	}
+
+	// Trim data beyond the receive window (RFC 9293 §3.10.7.4)
+	if r.windowSize > 0 {
+		rightEdge := r.nxt + uint32(r.windowSize)
+		if SeqAfter(endSeq, rightEdge) {
+			trim := endSeq - rightEdge
+			if trim >= uint32(len(data)) {
+				return 0 // entirely beyond window
+			}
+			data = data[:uint32(len(data))-trim]
+			endSeq = rightEdge
+		}
+	}
+	_ = endSeq
 
 	if seq == r.nxt {
 		// In-order: append to contiguous buffer

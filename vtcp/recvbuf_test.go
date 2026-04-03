@@ -3,7 +3,7 @@ package vtcp
 import "testing"
 
 func TestRecvBufInOrder(t *testing.T) {
-	rb := NewRecvBuf(1000)
+	rb := NewRecvBuf(1000, 0)
 
 	n := rb.Insert(1000, []byte("hello"))
 	if n != 5 {
@@ -24,7 +24,7 @@ func TestRecvBufInOrder(t *testing.T) {
 }
 
 func TestRecvBufOutOfOrder(t *testing.T) {
-	rb := NewRecvBuf(1000)
+	rb := NewRecvBuf(1000, 0)
 
 	// Segment 2 arrives first (out of order)
 	n := rb.Insert(1005, []byte("world"))
@@ -59,7 +59,7 @@ func TestRecvBufOutOfOrder(t *testing.T) {
 }
 
 func TestRecvBufDuplicate(t *testing.T) {
-	rb := NewRecvBuf(1000)
+	rb := NewRecvBuf(1000, 0)
 	rb.Insert(1000, []byte("hello"))
 
 	// Duplicate
@@ -73,7 +73,7 @@ func TestRecvBufDuplicate(t *testing.T) {
 }
 
 func TestRecvBufPartialOverlap(t *testing.T) {
-	rb := NewRecvBuf(1000)
+	rb := NewRecvBuf(1000, 0)
 	rb.Insert(1000, []byte("hel"))
 
 	// Overlapping retransmit
@@ -93,7 +93,7 @@ func TestRecvBufPartialOverlap(t *testing.T) {
 }
 
 func TestRecvBufMultipleOOO(t *testing.T) {
-	rb := NewRecvBuf(1000)
+	rb := NewRecvBuf(1000, 0)
 
 	// Three contiguous out-of-order segments (no gaps between them)
 	rb.Insert(1005, []byte("BB"))   // 1005-1007
@@ -119,7 +119,7 @@ func TestRecvBufMultipleOOO(t *testing.T) {
 }
 
 func TestRecvBufSACKBlocks(t *testing.T) {
-	rb := NewRecvBuf(1000)
+	rb := NewRecvBuf(1000, 0)
 	rb.Insert(1010, []byte("BB"))
 	rb.Insert(1020, []byte("CC"))
 
@@ -136,7 +136,7 @@ func TestRecvBufSACKBlocks(t *testing.T) {
 }
 
 func TestRecvBufSACKMax3(t *testing.T) {
-	rb := NewRecvBuf(1000)
+	rb := NewRecvBuf(1000, 0)
 	rb.Insert(1010, []byte("A"))
 	rb.Insert(1020, []byte("B"))
 	rb.Insert(1030, []byte("C"))
@@ -149,7 +149,7 @@ func TestRecvBufSACKMax3(t *testing.T) {
 }
 
 func TestRecvBufEmpty(t *testing.T) {
-	rb := NewRecvBuf(1000)
+	rb := NewRecvBuf(1000, 0)
 	n := rb.Insert(1000, nil)
 	if n != 0 {
 		t.Errorf("nil Insert = %d, want 0", n)
@@ -161,7 +161,7 @@ func TestRecvBufEmpty(t *testing.T) {
 }
 
 func TestRecvBufSequenceWrap(t *testing.T) {
-	rb := NewRecvBuf(0xFFFFFFF0)
+	rb := NewRecvBuf(0xFFFFFFF0, 0)
 
 	n := rb.Insert(0xFFFFFFF0, []byte("wrap"))
 	if n != 4 {
@@ -184,7 +184,7 @@ func TestRecvBufSequenceWrap(t *testing.T) {
 }
 
 func TestRecvBufOOOOverlap(t *testing.T) {
-	rb := NewRecvBuf(1000)
+	rb := NewRecvBuf(1000, 0)
 
 	// Two overlapping OOO segments
 	rb.Insert(1005, []byte("ABCDE"))

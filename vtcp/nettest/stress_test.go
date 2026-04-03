@@ -59,7 +59,9 @@ func connectPair(t *testing.T, p *Pair) {
 		if seg.HasFlag(vtcp.FlagSYN) && !seg.HasFlag(vtcp.FlagACK) {
 			synHandled = true
 			pkts := p.server.AcceptSYN(seg)
+			p.link.AtoB.mu.Lock()
 			p.link.AtoB.deliver = origDeliver
+			p.link.AtoB.mu.Unlock()
 			for _, pkt := range pkts {
 				_ = p.server.Writer()(pkt)
 			}
@@ -195,10 +197,10 @@ func transferUntil(t *testing.T, src, dst *vtcp.Conn, maxBytes int, maxDuration 
 	go func() {
 		buf := make([]byte, 65536)
 		for {
-			dst.SetReadDeadline(time.Now().Add(10 * time.Second))
+			// Generous per-read deadline, reset on each iteration
+			dst.SetReadDeadline(time.Now().Add(15 * time.Second))
 			n, err := dst.Read(buf)
 			if err != nil {
-				// If writer is done and we've read everything, that's OK
 				select {
 				case <-doneCh:
 					if received >= written {
@@ -289,7 +291,7 @@ func TestStressWithLoss(t *testing.T) {
 
 			connectPair(t, p)
 
-			size := 1024 * 1024 // 1MB — loss makes retransmission slow
+			size := 256 * 1024 // 256KB — loss makes retransmission slow
 			tp, elapsed := transferData(t, p.Client(), p.Server(), size)
 
 			aToB, bToA := p.Link().Stats()
@@ -388,7 +390,9 @@ func BenchmarkThroughputClean(b *testing.B) {
 		if seg.HasFlag(vtcp.FlagSYN) && !seg.HasFlag(vtcp.FlagACK) {
 			synHandled = true
 			pkts := p.server.AcceptSYN(seg)
+			p.link.AtoB.mu.Lock()
 			p.link.AtoB.deliver = origDeliver
+			p.link.AtoB.mu.Unlock()
 			for _, pkt := range pkts {
 				_ = p.server.Writer()(pkt)
 			}

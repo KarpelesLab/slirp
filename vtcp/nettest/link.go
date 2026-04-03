@@ -109,7 +109,12 @@ func (h *halfLink) send(seg []byte) {
 func (h *halfLink) deliverPacket(data []byte) {
 	h.stats.Delivered.Add(1)
 	h.stats.Bytes.Add(int64(len(data)))
-	h.deliver(data)
+	h.mu.Lock()
+	fn := h.deliver
+	h.mu.Unlock()
+	if fn != nil {
+		fn(data)
+	}
 }
 
 func (h *halfLink) schedule(data []byte, at time.Time) {
@@ -137,7 +142,11 @@ func (h *halfLink) flush() {
 	}
 	// Reschedule timer for next item
 	if h.queue.Len() > 0 {
-		h.timer.Reset(time.Until(h.queue[0].delivAt))
+		if h.timer != nil {
+			h.timer.Reset(time.Until(h.queue[0].delivAt))
+		} else {
+			h.timer = time.AfterFunc(time.Until(h.queue[0].delivAt), h.flush)
+		}
 	} else {
 		h.timer = nil
 	}

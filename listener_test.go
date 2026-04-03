@@ -442,8 +442,8 @@ func TestVirtualConnHandleInboundFIN(t *testing.T) {
 	_ = s.HandlePacket(0, clientMAC, gwMAC, ackPkt, writer)
 	time.Sleep(50 * time.Millisecond)
 
-	// Send FIN
-	finPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 2001, serverSeq+1, 0x01, nil)
+	// Send FIN+ACK (RFC 9293 requires ACK on all synchronized segments)
+	finPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 2001, serverSeq+1, 0x11, nil)
 	_ = s.HandlePacket(0, clientMAC, gwMAC, finPkt, writer)
 	time.Sleep(50 * time.Millisecond)
 

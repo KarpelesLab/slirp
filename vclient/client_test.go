@@ -214,3 +214,125 @@ func TestClientSetIP(t *testing.T) {
 		t.Errorf("IP = %v, want 192.168.1.100", ip)
 	}
 }
+
+// TestClientListen tests the vclient's Listen/Accept using two vclients
+// connected via loopback: each client's Writer delivers directly to the
+// other's HandleFrame.
+func TestClientListen(t *testing.T) {
+	serverMAC := [6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
+	clientMAC := [6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x02}
+
+	// Two clients wired directly: A's output → B's HandleFrame, and vice versa.
+	var serverClient, dialClient *vclient.Client
+
+	serverClient = vclient.New(serverMAC, nil)
+	dialClient = vclient.New(clientMAC, nil)
+
+	serverClient.SetWriter(func(frame []byte) error {
+		return dialClient.HandleFrame(frame)
+	})
+	dialClient.SetWriter(func(frame []byte) error {
+		return serverClient.HandleFrame(frame)
+	})
+
+	defer serverClient.Close()
+	defer dialClient.Close()
+
+	serverClient.SetIP(net.IPv4(10, 0, 0, 1), net.IPv4Mask(255, 255, 255, 0), net.IPv4(10, 0, 0, 2))
+	dialClient.SetIP(net.IPv4(10, 0, 0, 2), net.IPv4Mask(255, 255, 255, 0), net.IPv4(10, 0, 0, 1))
+
+	// Pre-configure ARP so they know each other's MAC
+	serverClient.SetGatewayMAC(clientMAC)
+	dialClient.SetGatewayMAC(serverMAC)
+
+	// Server listens on port 8080
+	ln, err := serverClient.Listen("tcp", "10.0.0.1:8080")
+	if err != nil {
+		t.Fatal("Listen:", err)
+	}
+	defer ln.Close()
+
+	if ln.Addr().String() != "10.0.0.1:8080" {
+		t.Errorf("Addr = %v, want 10.0.0.1:8080", ln.Addr())
+	}
+
+	// Echo server
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 4096)
+				for {
+					n, err := c.Read(buf)
+					if err != nil {
+						return
+					}
+					c.Write(buf[:n])
+				}
+			}(conn)
+		}
+	}()
+
+	// Client dials the server
+	conn, err := dialClient.Dial("tcp", "10.0.0.1:8080")
+	if err != nil {
+		t.Fatal("Dial:", err)
+	}
+	defer conn.Close()
+
+	testData := []byte("hello via vclient listener!")
+	if _, err := conn.Write(testData); err != nil {
+		t.Fatal("Write:", err)
+	}
+
+	buf := make([]byte, 100)
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatal("Read:", err)
+	}
+	if string(buf[:n]) != string(testData) {
+		t.Errorf("echo = %q, want %q", buf[:n], testData)
+	}
+}
+
+// TestClientListenDuplicate tests that double-listen on the same port fails.
+func TestClientListenDuplicate(t *testing.T) {
+	client := vclient.New([6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}, nil)
+	defer client.Close()
+	client.SetIP(net.IPv4(10, 0, 0, 2), net.IPv4Mask(255, 255, 255, 0), net.IPv4(10, 0, 0, 1))
+
+	ln, err := client.Listen("tcp", "10.0.0.2:9000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	_, err = client.Listen("tcp", "10.0.0.2:9000")
+	if err == nil {
+		t.Error("expected error for duplicate listen")
+	}
+}
+
+// TestClientListenClose tests that Accept returns error after Close.
+func TestClientListenClose(t *testing.T) {
+	client := vclient.New([6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}, nil)
+	defer client.Close()
+	client.SetIP(net.IPv4(10, 0, 0, 2), net.IPv4Mask(255, 255, 255, 0), net.IPv4(10, 0, 0, 1))
+
+	ln, err := client.Listen("tcp", "10.0.0.2:9000")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ln.Close()
+
+	_, err = ln.Accept()
+	if err == nil {
+		t.Error("expected error after close")
+	}
+}

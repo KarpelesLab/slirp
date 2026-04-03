@@ -43,6 +43,10 @@ type Client struct {
 	tcpMu    sync.Mutex
 	tcpConns map[connKey]*TCPConn
 
+	// TCP listeners
+	listenerMu sync.Mutex
+	listeners  map[uint16]*Listener // keyed by local port
+
 	// UDP connections
 	udpMu    sync.Mutex
 	udpConns map[connKey]*UDPConn
@@ -67,8 +71,9 @@ func New(mac [6]byte, w slirp.Writer) *Client {
 		w:        w,
 		arpTable: make(map[[4]byte][6]byte),
 		arpWait:  make(map[[4]byte][]chan [6]byte),
-		tcpConns: make(map[connKey]*TCPConn),
-		udpConns: make(map[connKey]*UDPConn),
+		tcpConns:  make(map[connKey]*TCPConn),
+		listeners: make(map[uint16]*Listener),
+		udpConns:  make(map[connKey]*UDPConn),
 		nextPort: 49152,
 		dhcpCh:   make(chan []byte, 4),
 		done:     make(chan struct{}),
@@ -206,6 +211,14 @@ func (c *Client) Close() error {
 		return nil
 	}
 	close(c.done)
+
+	// Close all listeners
+	c.listenerMu.Lock()
+	for port, l := range c.listeners {
+		l.closeOnce.Do(func() { close(l.closeCh) })
+		delete(c.listeners, port)
+	}
+	c.listenerMu.Unlock()
 
 	// Close all TCP connections
 	c.tcpMu.Lock()

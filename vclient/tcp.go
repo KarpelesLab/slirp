@@ -47,8 +47,11 @@ func (c *Client) handleTCP(ip []byte, ihl int) error {
 	}
 	srcPort := binary.BigEndian.Uint16(tcp[0:2])
 	dstPort := binary.BigEndian.Uint16(tcp[2:4])
+	var srcIP, dstIP [4]byte
+	copy(srcIP[:], ip[12:16])
+	copy(dstIP[:], ip[16:20])
 
-	k := connKey{localPort: dstPort, remoteIP: [4]byte(ip[12:16]), remotePort: srcPort}
+	k := connKey{localPort: dstPort, remoteIP: srcIP, remotePort: srcPort}
 	c.tcpMu.Lock()
 	conn := c.tcpConns[k]
 	c.tcpMu.Unlock()
@@ -62,7 +65,63 @@ func (c *Client) handleTCP(ip []byte, ihl int) error {
 		for _, pkt := range pkts {
 			_ = conn.vc.Writer()(pkt)
 		}
+		return nil
 	}
+
+	// No existing connection — check for SYN to a listener
+	flags := tcp[13]
+	if (flags & vtcp.FlagSYN) == 0 {
+		return nil // not a SYN, drop
+	}
+
+	c.listenerMu.Lock()
+	l := c.listeners[dstPort]
+	c.listenerMu.Unlock()
+	if l == nil {
+		return nil // no listener on this port
+	}
+
+	seg, err := vtcp.ParseSegment(tcp)
+	if err != nil {
+		return nil
+	}
+
+	// Create a new vtcp.Conn for this incoming connection
+	localAddr := &net.TCPAddr{IP: net.IP(dstIP[:]).To4(), Port: int(dstPort)}
+	remoteAddr := &net.TCPAddr{IP: net.IP(srcIP[:]).To4(), Port: int(srcPort)}
+
+	gwMAC := c.getGatewayMAC()
+	vc := vtcp.NewConn(vtcp.ConnConfig{
+		LocalPort:  dstPort,
+		RemotePort: srcPort,
+		LocalAddr:  localAddr,
+		RemoteAddr: remoteAddr,
+		Writer: func(tcpSeg []byte) error {
+			return c.sendIPv4(gwMAC, buildIPv4Packet(dstIP, srcIP, tcpSeg))
+		},
+		MSS:       1460,
+		Keepalive: true,
+	})
+
+	synAckPkts := vc.AcceptSYN(seg)
+	tc := &TCPConn{vc: vc, c: c, k: k}
+
+	c.tcpMu.Lock()
+	c.tcpConns[k] = tc
+	c.tcpMu.Unlock()
+
+	// Send SYN-ACK
+	for _, pkt := range synAckPkts {
+		_ = vc.Writer()(pkt)
+	}
+
+	// Queue for Accept()
+	select {
+	case l.acceptCh <- tc:
+	default:
+		// Accept queue full, drop
+	}
+
 	return nil
 }
 

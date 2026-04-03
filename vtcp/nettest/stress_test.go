@@ -153,6 +153,89 @@ func transferData(t *testing.T, src, dst *vtcp.Conn, size int) (throughput float
 	return throughput, elapsed
 }
 
+// maxTransferSize is the cap per-test to avoid very long test times.
+const maxTransferSize = 100 * 1024 * 1024 // 100 MB
+
+// transferUntil streams data until either maxBytes or maxDuration is reached.
+// Returns bytes transferred, throughput, and elapsed time.
+func transferUntil(t *testing.T, src, dst *vtcp.Conn, maxBytes int, maxDuration time.Duration) (transferred int, throughput float64, elapsed time.Duration) {
+	t.Helper()
+
+	deadline := time.Now().Add(maxDuration)
+
+	errCh := make(chan error, 2)
+	doneCh := make(chan struct{})
+
+	// Writer
+	written := 0
+	go func() {
+		buf := make([]byte, 32768)
+		for i := range buf {
+			buf[i] = byte(i % 251)
+		}
+		for written < maxBytes && time.Now().Before(deadline) {
+			chunk := buf
+			remaining := maxBytes - written
+			if len(chunk) > remaining {
+				chunk = chunk[:remaining]
+			}
+			n, err := src.Write(chunk)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			written += n
+		}
+		close(doneCh)
+		errCh <- nil
+	}()
+
+	// Reader
+	received := 0
+	go func() {
+		buf := make([]byte, 65536)
+		for {
+			dst.SetReadDeadline(time.Now().Add(10 * time.Second))
+			n, err := dst.Read(buf)
+			if err != nil {
+				// If writer is done and we've read everything, that's OK
+				select {
+				case <-doneCh:
+					if received >= written {
+						errCh <- nil
+						return
+					}
+				default:
+				}
+				errCh <- err
+				return
+			}
+			received += n
+			select {
+			case <-doneCh:
+				if received >= written {
+					errCh <- nil
+					return
+				}
+			default:
+			}
+		}
+	}()
+
+	start := time.Now()
+	for range 2 {
+		if err := <-errCh; err != nil {
+			t.Fatalf("transfer error at %d/%d bytes: %v", received, written, err)
+		}
+	}
+	elapsed = time.Since(start)
+	transferred = received
+	if elapsed > 0 {
+		throughput = float64(transferred) / elapsed.Seconds()
+	}
+	return
+}
+
 func TestStressClean(t *testing.T) {
 	p, err := NewPair(LinkConfig{})
 	if err != nil {
@@ -162,19 +245,17 @@ func TestStressClean(t *testing.T) {
 
 	connectPair(t, p)
 
-	size := 256 * 1024 // 256 KB
-	tp, elapsed := transferData(t, p.Client(), p.Server(), size)
-	t.Logf("Clean: %d KB in %v (%.1f MB/s)", size/1024, elapsed, tp/1e6)
+	transferred, tp, elapsed := transferUntil(t, p.Client(), p.Server(), maxTransferSize, 5*time.Second)
+	t.Logf("Clean: %d MB in %v (%.1f MB/s)", transferred/1024/1024, elapsed, tp/1e6)
 }
 
 func TestStressWithDelay(t *testing.T) {
 	tests := []struct {
 		delay time.Duration
-		size  int
 	}{
-		{5 * time.Millisecond, 4 * 1024 * 1024},
-		{25 * time.Millisecond, 4 * 1024 * 1024},
-		{50 * time.Millisecond, 4 * 1024 * 1024},
+		{5 * time.Millisecond},
+		{25 * time.Millisecond},
+		{50 * time.Millisecond},
 	}
 	for _, tt := range tests {
 		t.Run(tt.delay.String(), func(t *testing.T) {
@@ -186,11 +267,11 @@ func TestStressWithDelay(t *testing.T) {
 
 			connectPair(t, p)
 
-			tp, elapsed := transferData(t, p.Client(), p.Server(), tt.size)
+			transferred, tp, elapsed := transferUntil(t, p.Client(), p.Server(), maxTransferSize, 5*time.Second)
 
 			aToB, bToA := p.Link().Stats()
-			t.Logf("Delay %v: %d KB in %v (%.1f MB/s) | c→s: %d sent %d delivered | s→c: %d sent %d delivered",
-				tt.delay, tt.size/1024, elapsed, tp/1e6,
+			t.Logf("Delay %v: %d MB in %v (%.1f MB/s) | c→s: %d sent %d delivered | s→c: %d sent %d delivered",
+				tt.delay, transferred/1024/1024, elapsed, tp/1e6,
 				aToB.Sent.Load(), aToB.Delivered.Load(),
 				bToA.Sent.Load(), bToA.Delivered.Load())
 		})
@@ -208,7 +289,7 @@ func TestStressWithLoss(t *testing.T) {
 
 			connectPair(t, p)
 
-			size := 128 * 1024
+			size := 1024 * 1024 // 1MB — loss makes retransmission slow
 			tp, elapsed := transferData(t, p.Client(), p.Server(), size)
 
 			aToB, bToA := p.Link().Stats()
@@ -229,12 +310,11 @@ func TestStressWithReorder(t *testing.T) {
 
 	connectPair(t, p)
 
-	size := 64 * 1024
-	tp, elapsed := transferData(t, p.Client(), p.Server(), size)
+	transferred, tp, elapsed := transferUntil(t, p.Client(), p.Server(), maxTransferSize, 5*time.Second)
 
 	aToB, bToA := p.Link().Stats()
-	t.Logf("Reorder 10%%: %d KB in %v (%.1f MB/s) | c→s: %d reordered | s→c: %d reordered",
-		size/1024, elapsed, tp/1e6,
+	t.Logf("Reorder 10%%: %d MB in %v (%.1f MB/s) | c→s: %d reordered | s→c: %d reordered",
+		transferred/1024/1024, elapsed, tp/1e6,
 		aToB.Reordered.Load(), bToA.Reordered.Load())
 }
 
@@ -252,12 +332,11 @@ func TestStressCombined(t *testing.T) {
 
 	connectPair(t, p)
 
-	size := 32 * 1024
-	tp, elapsed := transferData(t, p.Client(), p.Server(), size)
+	transferred, tp, elapsed := transferUntil(t, p.Client(), p.Server(), 4*1024*1024, 5*time.Second)
 
 	aToB, bToA := p.Link().Stats()
-	t.Logf("Combined: %d KB in %v (%.1f MB/s) | c→s: sent=%d drop=%d reord=%d | s→c: sent=%d drop=%d reord=%d",
-		size/1024, elapsed, tp/1e6,
+	t.Logf("Combined: %d MB in %v (%.1f MB/s) | c→s: sent=%d drop=%d reord=%d | s→c: sent=%d drop=%d reord=%d",
+		transferred/1024/1024, elapsed, tp/1e6,
 		aToB.Sent.Load(), aToB.Dropped.Load(), aToB.Reordered.Load(),
 		bToA.Sent.Load(), bToA.Dropped.Load(), bToA.Reordered.Load())
 }
@@ -271,7 +350,6 @@ func TestStressBidirectional(t *testing.T) {
 
 	connectPair(t, p)
 
-	// Wait for server to reach ESTABLISHED
 	for i := 0; i < 100; i++ {
 		if p.Server().State() == vtcp.StateEstablished {
 			break
@@ -279,15 +357,11 @@ func TestStressBidirectional(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 
-	size := 32 * 1024
+	transferred, tp, elapsed := transferUntil(t, p.Client(), p.Server(), maxTransferSize, 3*time.Second)
+	t.Logf("C→S: %d MB in %v (%.1f MB/s)", transferred/1024/1024, elapsed, tp/1e6)
 
-	// Client → Server (sequential for simplicity with delay)
-	tp, elapsed := transferData(t, p.Client(), p.Server(), size)
-	t.Logf("C→S: %d KB in %v (%.1f MB/s)", size/1024, elapsed, tp/1e6)
-
-	// Server → Client
-	tp, elapsed = transferData(t, p.Server(), p.Client(), size)
-	t.Logf("S→C: %d KB in %v (%.1f MB/s)", size/1024, elapsed, tp/1e6)
+	transferred, tp, elapsed = transferUntil(t, p.Server(), p.Client(), maxTransferSize, 3*time.Second)
+	t.Logf("S→C: %d MB in %v (%.1f MB/s)", transferred/1024/1024, elapsed, tp/1e6)
 }
 
 // BenchmarkThroughputClean measures baseline throughput.

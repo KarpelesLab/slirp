@@ -1,5 +1,7 @@
 package vtcp
 
+import "math"
+
 // CongestionController defines the interface for TCP congestion control algorithms.
 type CongestionController interface {
 	// OnACK is called when new bytes are acknowledged.
@@ -115,3 +117,133 @@ func (nr *NewReno) InRecovery() bool {
 func (nr *NewReno) SSThresh() uint32 {
 	return nr.ssthresh
 }
+
+// HighSpeed implements RFC 3649 HighSpeed TCP for large congestion windows.
+// When cwnd <= Low_Window (38 segments), it behaves identically to NewReno.
+// Above that threshold, it uses more aggressive increase/decrease functions
+// that scale better on high-BDP networks.
+type HighSpeed struct {
+	cwnd       uint32
+	ssthresh   uint32
+	mss        uint32
+	dupAckCnt  int
+	recovery   bool
+	recoverSeq uint32
+}
+
+// RFC 3649 parameters
+const (
+	hsLowWindow  = 38    // segments — below this, use standard TCP
+	hsHighWindow = 83000 // segments
+	hsHighDecrease = 0.1
+)
+
+// NewHighSpeed creates a HighSpeed TCP congestion controller (RFC 3649).
+func NewHighSpeed(mss uint32) *HighSpeed {
+	initialCWND := 10 * mss
+	if alt := max(2*mss, 14600); alt < initialCWND {
+		initialCWND = alt
+	}
+	return &HighSpeed{
+		cwnd:     initialCWND,
+		ssthresh: ^uint32(0),
+		mss:      mss,
+	}
+}
+
+// hstcpA returns the increase parameter a(w) for HighSpeed TCP.
+// w is in segments (cwnd/mss).
+func hstcpA(w uint32) float64 {
+	if w <= hsLowWindow {
+		return 1.0
+	}
+	b := hstcpB(w)
+	// p(w) = 0.078 / w^1.2
+	p := 0.078 / math.Pow(float64(w), 1.2)
+	// a(w) = w^2 * p * 2*b / (2-b)
+	wf := float64(w)
+	return wf * wf * p * 2.0 * b / (2.0 - b)
+}
+
+// hstcpB returns the decrease parameter b(w) for HighSpeed TCP.
+// w is in segments.
+func hstcpB(w uint32) float64 {
+	if w <= hsLowWindow {
+		return 0.5
+	}
+	// b(w) = (High_Decrease - 0.5) * (log(w) - log(Low_Window)) /
+	//        (log(High_Window) - log(Low_Window)) + 0.5
+	logW := math.Log(float64(w))
+	logLow := math.Log(float64(hsLowWindow))
+	logHigh := math.Log(float64(hsHighWindow))
+	return (hsHighDecrease-0.5)*(logW-logLow)/(logHigh-logLow) + 0.5
+}
+
+func (hs *HighSpeed) OnACK(bytesAcked uint32) {
+	hs.dupAckCnt = 0
+
+	if hs.cwnd < hs.ssthresh {
+		// Slow start: same as standard TCP
+		inc := bytesAcked
+		if inc > hs.mss {
+			inc = hs.mss
+		}
+		hs.cwnd += inc
+	} else {
+		// Congestion avoidance: w += a(w)/w per ACK (in bytes)
+		wSegs := hs.cwnd / hs.mss
+		a := hstcpA(wSegs)
+		// Convert: increase in bytes = a * MSS^2 / cwnd
+		// (since a(w) is defined for w in segments, and we want bytes)
+		inc := uint32(a * float64(hs.mss) * float64(hs.mss) / float64(hs.cwnd))
+		if inc == 0 {
+			inc = 1
+		}
+		hs.cwnd += inc
+	}
+}
+
+func (hs *HighSpeed) OnDupACK() bool {
+	hs.dupAckCnt++
+	if hs.dupAckCnt == 3 && !hs.recovery {
+		return true
+	}
+	if hs.recovery && hs.dupAckCnt > 3 {
+		hs.cwnd += hs.mss
+	}
+	return false
+}
+
+func (hs *HighSpeed) OnFastRetransmit(flightSize uint32) {
+	wSegs := hs.cwnd / hs.mss
+	b := hstcpB(wSegs)
+	// ssthresh = (1 - b(w)) * cwnd
+	hs.ssthresh = uint32(float64(hs.cwnd) * (1.0 - b))
+	if hs.ssthresh < 2*hs.mss {
+		hs.ssthresh = 2 * hs.mss
+	}
+	hs.cwnd = hs.ssthresh + 3*hs.mss
+	hs.recovery = true
+}
+
+func (hs *HighSpeed) ExitRecovery() {
+	hs.cwnd = hs.ssthresh
+	hs.recovery = false
+	hs.dupAckCnt = 0
+}
+
+func (hs *HighSpeed) OnTimeout() {
+	wSegs := hs.cwnd / hs.mss
+	b := hstcpB(wSegs)
+	hs.ssthresh = uint32(float64(hs.cwnd) * (1.0 - b))
+	if hs.ssthresh < 2*hs.mss {
+		hs.ssthresh = 2 * hs.mss
+	}
+	hs.cwnd = hs.mss
+	hs.recovery = false
+	hs.dupAckCnt = 0
+}
+
+func (hs *HighSpeed) SendWindow() uint32 { return hs.cwnd }
+func (hs *HighSpeed) InRecovery() bool    { return hs.recovery }
+func (hs *HighSpeed) SSThresh() uint32    { return hs.ssthresh }

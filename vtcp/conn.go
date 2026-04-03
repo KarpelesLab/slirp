@@ -26,6 +26,9 @@ type ConnConfig struct {
 	// RFC 2018
 	EnableSACK bool
 
+	// Congestion control: "newreno" or "highspeed" (default: "highspeed")
+	CongestionControl string
+
 	// RFC 1122 keepalive
 	Keepalive         bool
 	KeepaliveIdle     time.Duration
@@ -34,6 +37,15 @@ type ConnConfig struct {
 
 	SendBufSize int
 	RecvBufSize int
+}
+
+func newCongestionController(name string, mss uint32) CongestionController {
+	switch name {
+	case "newreno":
+		return NewNewReno(mss)
+	default: // "highspeed" or empty
+		return NewHighSpeed(mss)
+	}
 }
 
 func (cfg *ConnConfig) mss() int {
@@ -166,7 +178,7 @@ func NewConn(cfg ConnConfig) *Conn {
 		state:      StateClosed,
 		mss:        cfg.mss(),
 		sndWnd:     DefaultWindowSize,
-		cc:         NewNewReno(uint32(cfg.mss())),
+		cc:         newCongestionController(cfg.CongestionControl, uint32(cfg.mss())),
 		rto:        NewRTOCalculator(),
 		lastRecv:   time.Now(),
 		recvBufCap: recvBufCap,
@@ -488,7 +500,7 @@ func (c *Conn) handleSynSent(seg Segment) [][]byte {
 	// Set receive state
 	c.recvBuf = NewRecvBuf(seg.Seq + 1) // SYN consumes 1 seq
 	c.sndWnd = uint32(seg.Window) << c.sndWndShift
-	c.cc = NewNewReno(uint32(c.mss)) // reinit with negotiated MSS
+	c.cc = NewHighSpeed(uint32(c.mss)) // reinit with negotiated MSS
 
 	// RTT sample
 	c.rto.AckReceived(seg.Ack)

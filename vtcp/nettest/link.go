@@ -31,11 +31,23 @@ type deliveryItem struct {
 // deliveryQueue is a min-heap ordered by delivery time.
 type deliveryQueue []*deliveryItem
 
-func (q deliveryQueue) Len() int            { return len(q) }
-func (q deliveryQueue) Less(i, j int) bool  { return q[i].delivAt.Before(q[j].delivAt) }
-func (q deliveryQueue) Swap(i, j int)       { q[i], q[j] = q[j], q[i]; q[i].index = i; q[j].index = j }
-func (q *deliveryQueue) Push(x any)         { item := x.(*deliveryItem); item.index = len(*q); *q = append(*q, item) }
-func (q *deliveryQueue) Pop() any           { old := *q; n := len(old); item := old[n-1]; old[n-1] = nil; item.index = -1; *q = old[:n-1]; return item }
+func (q deliveryQueue) Len() int           { return len(q) }
+func (q deliveryQueue) Less(i, j int) bool { return q[i].delivAt.Before(q[j].delivAt) }
+func (q deliveryQueue) Swap(i, j int)      { q[i], q[j] = q[j], q[i]; q[i].index = i; q[j].index = j }
+func (q *deliveryQueue) Push(x any) {
+	item := x.(*deliveryItem)
+	item.index = len(*q)
+	*q = append(*q, item)
+}
+func (q *deliveryQueue) Pop() any {
+	old := *q
+	n := len(old)
+	item := old[n-1]
+	old[n-1] = nil
+	item.index = -1
+	*q = old[:n-1]
+	return item
+}
 
 // halfLink represents one direction of a link (A→B).
 type halfLink struct {

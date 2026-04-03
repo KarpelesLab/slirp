@@ -15,10 +15,10 @@ func TestHandleIPv6_Basic(t *testing.T) {
 	packet := make([]byte, 60) // 40 byte header + 20 byte TCP header
 
 	// IPv6 header
-	packet[0] = 0x60 // Version 6
+	packet[0] = 0x60                            // Version 6
 	binary.BigEndian.PutUint16(packet[4:6], 20) // Payload length (TCP header)
-	packet[6] = 6  // Next Header: TCP
-	packet[7] = 64 // Hop Limit
+	packet[6] = 6                               // Next Header: TCP
+	packet[7] = 64                              // Hop Limit
 
 	// Source address: ::1 (localhost)
 	packet[23] = 0x01
@@ -69,10 +69,10 @@ func TestHandleIPv6_UDP(t *testing.T) {
 	packet := make([]byte, 48+len(data)) // 40 byte header + 8 byte UDP header + data
 
 	// IPv6 header
-	packet[0] = 0x60 // Version 6
+	packet[0] = 0x60                                             // Version 6
 	binary.BigEndian.PutUint16(packet[4:6], uint16(8+len(data))) // Payload length
-	packet[6] = 17 // Next Header: UDP
-	packet[7] = 64 // Hop Limit
+	packet[6] = 17                                               // Next Header: UDP
+	packet[7] = 64                                               // Hop Limit
 
 	// Source address: ::1 (localhost)
 	packet[23] = 0x01
@@ -81,8 +81,8 @@ func TestHandleIPv6_UDP(t *testing.T) {
 	packet[39] = 0x01
 
 	// UDP header at byte 40
-	binary.BigEndian.PutUint16(packet[40:42], 54321) // Source port
-	binary.BigEndian.PutUint16(packet[42:44], 53)    // Dest port (DNS)
+	binary.BigEndian.PutUint16(packet[40:42], 54321)               // Source port
+	binary.BigEndian.PutUint16(packet[42:44], 53)                  // Dest port (DNS)
 	binary.BigEndian.PutUint16(packet[44:46], uint16(8+len(data))) // Length
 
 	// Copy data
@@ -105,10 +105,10 @@ func TestHandleIPv6_ICMPv6(t *testing.T) {
 	packet := make([]byte, 48) // 40 byte header + 8 byte ICMPv6
 
 	// IPv6 header
-	packet[0] = 0x60 // Version 6
+	packet[0] = 0x60                           // Version 6
 	binary.BigEndian.PutUint16(packet[4:6], 8) // Payload length
-	packet[6] = 58 // Next Header: ICMPv6
-	packet[7] = 64 // Hop Limit
+	packet[6] = 58                             // Next Header: ICMPv6
+	packet[7] = 64                             // Hop Limit
 
 	// Addresses
 	packet[8] = 0xfe

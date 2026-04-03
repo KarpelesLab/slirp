@@ -29,9 +29,9 @@ func (tc *TCPConn) Close() error {
 	return err
 }
 
-func (tc *TCPConn) LocalAddr() net.Addr             { return tc.vc.LocalAddr() }
-func (tc *TCPConn) RemoteAddr() net.Addr            { return tc.vc.RemoteAddr() }
-func (tc *TCPConn) SetDeadline(t time.Time) error     { return tc.vc.SetDeadline(t) }
+func (tc *TCPConn) LocalAddr() net.Addr                { return tc.vc.LocalAddr() }
+func (tc *TCPConn) RemoteAddr() net.Addr               { return tc.vc.RemoteAddr() }
+func (tc *TCPConn) SetDeadline(t time.Time) error      { return tc.vc.SetDeadline(t) }
 func (tc *TCPConn) SetReadDeadline(t time.Time) error  { return tc.vc.SetReadDeadline(t) }
 func (tc *TCPConn) SetWriteDeadline(t time.Time) error { return tc.vc.SetWriteDeadline(t) }
 

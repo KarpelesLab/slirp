@@ -33,7 +33,7 @@ func (s *Stack) handleIPv6(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, 
 	// Bytes 24-39: Destination Address (128 bits)
 
 	_ = binary.BigEndian.Uint16(packet[4:6]) // payloadLen - not used yet
-	nextHeader := packet[6]                   // This is the protocol (TCP=6, UDP=17, etc.)
+	nextHeader := packet[6]                  // This is the protocol (TCP=6, UDP=17, etc.)
 
 	var srcIP, dstIP [16]byte
 	copy(srcIP[:], packet[8:24])

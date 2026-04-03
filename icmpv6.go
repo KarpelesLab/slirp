@@ -6,11 +6,11 @@ import (
 
 // ICMPv6 Type codes
 const (
-	ICMPv6TypeEchoRequest      = 128
-	ICMPv6TypeEchoReply        = 129
-	ICMPv6TypeRouterSolicitation = 133
-	ICMPv6TypeRouterAdvertisement = 134
-	ICMPv6TypeNeighborSolicitation = 135
+	ICMPv6TypeEchoRequest           = 128
+	ICMPv6TypeEchoReply             = 129
+	ICMPv6TypeRouterSolicitation    = 133
+	ICMPv6TypeRouterAdvertisement   = 134
+	ICMPv6TypeNeighborSolicitation  = 135
 	ICMPv6TypeNeighborAdvertisement = 136
 )
 
@@ -65,7 +65,7 @@ func (s *Stack) handleICMPv6EchoRequest(clientMAC, gwMAC [6]byte, packet []byte,
 	replyICMP := make([]byte, len(icmp))
 	copy(replyICMP, icmp)
 	replyICMP[0] = ICMPv6TypeEchoReply // Change type to Echo Reply
-	replyICMP[1] = 0                    // Code = 0
+	replyICMP[1] = 0                   // Code = 0
 
 	// Recalculate checksum
 	binary.BigEndian.PutUint16(replyICMP[2:4], 0)
@@ -76,15 +76,15 @@ func (s *Stack) handleICMPv6EchoRequest(clientMAC, gwMAC [6]byte, packet []byte,
 	ip := make([]byte, 40)
 	ip[0] = 0x60 // Version 6
 	binary.BigEndian.PutUint16(ip[4:6], uint16(len(replyICMP)))
-	ip[6] = 58 // Next Header: ICMPv6
-	ip[7] = 64 // Hop Limit
-	copy(ip[8:24], dstIP[:])   // Source = original dest
-	copy(ip[24:40], srcIP[:])  // Dest = original source
+	ip[6] = 58                // Next Header: ICMPv6
+	ip[7] = 64                // Hop Limit
+	copy(ip[8:24], dstIP[:])  // Source = original dest
+	copy(ip[24:40], srcIP[:]) // Dest = original source
 
 	// Build Ethernet frame
 	frame := make([]byte, 14+len(ip)+len(replyICMP))
-	copy(frame[0:6], clientMAC[:])  // Dest MAC
-	copy(frame[6:12], gwMAC[:])     // Source MAC
+	copy(frame[0:6], clientMAC[:])                   // Dest MAC
+	copy(frame[6:12], gwMAC[:])                      // Source MAC
 	binary.BigEndian.PutUint16(frame[12:14], 0x86DD) // IPv6 EtherType
 	copy(frame[14:], ip)
 	copy(frame[14+len(ip):], replyICMP)
@@ -120,8 +120,8 @@ func (s *Stack) handleICMPv6NeighborSolicitation(clientMAC, gwMAC [6]byte, packe
 	copy(na[8:24], targetAddr[:])
 
 	// Target Link-Layer Address Option (Type 2, Length 1 = 8 bytes)
-	na[24] = 2   // Type: Target Link-Layer Address
-	na[25] = 1   // Length: 1 (in units of 8 bytes)
+	na[24] = 2                // Type: Target Link-Layer Address
+	na[25] = 1                // Length: 1 (in units of 8 bytes)
 	copy(na[26:32], gwMAC[:]) // Our MAC address
 
 	// Calculate checksum (source must be target address, not dstIP which may be multicast)
@@ -132,15 +132,15 @@ func (s *Stack) handleICMPv6NeighborSolicitation(clientMAC, gwMAC [6]byte, packe
 	ip := make([]byte, 40)
 	ip[0] = 0x60 // Version 6
 	binary.BigEndian.PutUint16(ip[4:6], uint16(len(na)))
-	ip[6] = 58 // Next Header: ICMPv6
-	ip[7] = 255 // Hop Limit (must be 255 for NDP)
-	copy(ip[8:24], targetAddr[:])  // Source = target address being resolved
-	copy(ip[24:40], srcIP[:])      // Dest = original source
+	ip[6] = 58                    // Next Header: ICMPv6
+	ip[7] = 255                   // Hop Limit (must be 255 for NDP)
+	copy(ip[8:24], targetAddr[:]) // Source = target address being resolved
+	copy(ip[24:40], srcIP[:])     // Dest = original source
 
 	// Build Ethernet frame
 	frame := make([]byte, 14+len(ip)+len(na))
-	copy(frame[0:6], clientMAC[:])  // Dest MAC
-	copy(frame[6:12], gwMAC[:])     // Source MAC
+	copy(frame[0:6], clientMAC[:])                   // Dest MAC
+	copy(frame[6:12], gwMAC[:])                      // Source MAC
 	binary.BigEndian.PutUint16(frame[12:14], 0x86DD) // IPv6 EtherType
 	copy(frame[14:], ip)
 	copy(frame[14+len(ip):], na)

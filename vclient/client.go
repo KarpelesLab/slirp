@@ -67,16 +67,16 @@ type Client struct {
 // Ethernet frame.
 func New(mac [6]byte, w slirp.Writer) *Client {
 	return &Client{
-		mac:      mac,
-		w:        w,
-		arpTable: make(map[[4]byte][6]byte),
-		arpWait:  make(map[[4]byte][]chan [6]byte),
+		mac:       mac,
+		w:         w,
+		arpTable:  make(map[[4]byte][6]byte),
+		arpWait:   make(map[[4]byte][]chan [6]byte),
 		tcpConns:  make(map[connKey]*TCPConn),
 		listeners: make(map[uint16]*Listener),
 		udpConns:  make(map[connKey]*UDPConn),
-		nextPort: 49152,
-		dhcpCh:   make(chan []byte, 4),
-		done:     make(chan struct{}),
+		nextPort:  49152,
+		dhcpCh:    make(chan []byte, 4),
+		done:      make(chan struct{}),
 	}
 }
 

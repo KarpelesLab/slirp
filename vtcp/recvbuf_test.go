@@ -96,9 +96,9 @@ func TestRecvBufMultipleOOO(t *testing.T) {
 	rb := NewRecvBuf(1000, 0)
 
 	// Three contiguous out-of-order segments (no gaps between them)
-	rb.Insert(1005, []byte("BB"))   // 1005-1007
-	rb.Insert(1007, []byte("CC"))   // 1007-1009
-	rb.Insert(1009, []byte("DD"))   // 1009-1011
+	rb.Insert(1005, []byte("BB")) // 1005-1007
+	rb.Insert(1007, []byte("CC")) // 1007-1009
+	rb.Insert(1009, []byte("DD")) // 1009-1011
 
 	// Fill the initial gap
 	n := rb.Insert(1000, []byte("AAAAA")) // 1000-1005

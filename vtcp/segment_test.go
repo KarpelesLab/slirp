@@ -8,13 +8,13 @@ import (
 func TestParseSegmentMinimal(t *testing.T) {
 	// Build a minimal 20-byte TCP header
 	raw := make([]byte, 20)
-	binary.BigEndian.PutUint16(raw[0:2], 12345)  // src port
+	binary.BigEndian.PutUint16(raw[0:2], 12345)   // src port
 	binary.BigEndian.PutUint16(raw[2:4], 80)      // dst port
 	binary.BigEndian.PutUint32(raw[4:8], 1000)    // seq
 	binary.BigEndian.PutUint32(raw[8:12], 2000)   // ack
-	raw[12] = 5 << 4                               // data offset = 5 (20 bytes)
-	raw[13] = FlagSYN | FlagACK                    // flags
-	binary.BigEndian.PutUint16(raw[14:16], 65535)  // window
+	raw[12] = 5 << 4                              // data offset = 5 (20 bytes)
+	raw[13] = FlagSYN | FlagACK                   // flags
+	binary.BigEndian.PutUint16(raw[14:16], 65535) // window
 
 	seg, err := ParseSegment(raw)
 	if err != nil {

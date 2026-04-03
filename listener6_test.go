@@ -99,17 +99,17 @@ func TestVirtualConnection6(t *testing.T) {
 
 	// Send SYN packet
 	synPacket := make([]byte, 60)
-	synPacket[0] = 0x60                                        // Version 6
-	binary.BigEndian.PutUint16(synPacket[4:6], 20)           // Payload length
-	synPacket[6] = 6                                          // TCP
-	synPacket[7] = 64                                         // Hop limit
-	synPacket[23] = 0x02                                     // Source: ::2
-	synPacket[39] = 0x01                                     // Dest: ::1
-	binary.BigEndian.PutUint16(synPacket[40:42], 54321)      // Source port
-	binary.BigEndian.PutUint16(synPacket[42:44], 9000)       // Dest port
-	binary.BigEndian.PutUint32(synPacket[44:48], 1000)       // Seq
-	synPacket[52] = 0x50                                     // Data offset
-	synPacket[53] = 0x02                                     // SYN flag
+	synPacket[0] = 0x60                                 // Version 6
+	binary.BigEndian.PutUint16(synPacket[4:6], 20)      // Payload length
+	synPacket[6] = 6                                    // TCP
+	synPacket[7] = 64                                   // Hop limit
+	synPacket[23] = 0x02                                // Source: ::2
+	synPacket[39] = 0x01                                // Dest: ::1
+	binary.BigEndian.PutUint16(synPacket[40:42], 54321) // Source port
+	binary.BigEndian.PutUint16(synPacket[42:44], 9000)  // Dest port
+	binary.BigEndian.PutUint32(synPacket[44:48], 1000)  // Seq
+	synPacket[52] = 0x50                                // Data offset
+	synPacket[53] = 0x02                                // SYN flag
 
 	err = s.HandlePacket(0, clientMAC, gwMAC, synPacket, writer)
 	if err != nil {
@@ -119,9 +119,9 @@ func TestVirtualConnection6(t *testing.T) {
 	// Send ACK to complete handshake
 	ackPacket := make([]byte, 60)
 	copy(ackPacket, synPacket)
-	binary.BigEndian.PutUint32(ackPacket[44:48], 1001)  // Seq
-	binary.BigEndian.PutUint32(ackPacket[48:52], 1001)  // Ack (server's seq + 1)
-	ackPacket[53] = 0x10                                 // ACK flag
+	binary.BigEndian.PutUint32(ackPacket[44:48], 1001) // Seq
+	binary.BigEndian.PutUint32(ackPacket[48:52], 1001) // Ack (server's seq + 1)
+	ackPacket[53] = 0x10                               // ACK flag
 
 	time.Sleep(10 * time.Millisecond)
 	err = s.HandlePacket(0, clientMAC, gwMAC, ackPacket, writer)
@@ -134,7 +134,7 @@ func TestVirtualConnection6(t *testing.T) {
 	dataPacket := make([]byte, 60+len(testData))
 	copy(dataPacket, ackPacket)
 	binary.BigEndian.PutUint16(dataPacket[4:6], uint16(20+len(testData))) // Update payload length
-	dataPacket[53] = 0x18                                                   // PSH+ACK
+	dataPacket[53] = 0x18                                                 // PSH+ACK
 	copy(dataPacket[60:], testData)
 
 	time.Sleep(10 * time.Millisecond)

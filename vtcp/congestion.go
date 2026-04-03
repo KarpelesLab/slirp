@@ -133,8 +133,8 @@ type HighSpeed struct {
 
 // RFC 3649 parameters
 const (
-	hsLowWindow  = 38    // segments — below this, use standard TCP
-	hsHighWindow = 83000 // segments
+	hsLowWindow    = 38    // segments — below this, use standard TCP
+	hsHighWindow   = 83000 // segments
 	hsHighDecrease = 0.1
 )
 
@@ -245,5 +245,5 @@ func (hs *HighSpeed) OnTimeout() {
 }
 
 func (hs *HighSpeed) SendWindow() uint32 { return hs.cwnd }
-func (hs *HighSpeed) InRecovery() bool    { return hs.recovery }
-func (hs *HighSpeed) SSThresh() uint32    { return hs.ssthresh }
+func (hs *HighSpeed) InRecovery() bool   { return hs.recovery }
+func (hs *HighSpeed) SSThresh() uint32   { return hs.ssthresh }

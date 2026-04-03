@@ -36,9 +36,9 @@ func TestICMPv6EchoRequest(t *testing.T) {
 
 	// ICMPv6 Echo Request
 	icmp := packet[40:]
-	icmp[0] = 128 // Type: Echo Request
-	icmp[1] = 0   // Code
-	binary.BigEndian.PutUint16(icmp[2:4], 0) // Checksum placeholder
+	icmp[0] = 128                               // Type: Echo Request
+	icmp[1] = 0                                 // Code
+	binary.BigEndian.PutUint16(icmp[2:4], 0)    // Checksum placeholder
 	binary.BigEndian.PutUint16(icmp[4:6], 1234) // Identifier
 	binary.BigEndian.PutUint16(icmp[6:8], 1)    // Sequence number
 	copy(icmp[8:], payload)
@@ -137,8 +137,8 @@ func TestICMPv6NeighborSolicitation(t *testing.T) {
 
 	// ICMPv6 Neighbor Solicitation
 	icmp := packet[40:]
-	icmp[0] = 135 // Type: Neighbor Solicitation
-	icmp[1] = 0   // Code
+	icmp[0] = 135                            // Type: Neighbor Solicitation
+	icmp[1] = 0                              // Code
 	binary.BigEndian.PutUint16(icmp[2:4], 0) // Checksum placeholder
 	// Reserved (4 bytes)
 	// Target Address: fe80::2

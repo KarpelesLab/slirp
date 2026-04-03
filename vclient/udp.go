@@ -126,8 +126,8 @@ func (u *UDPConn) RemoteAddr() net.Addr {
 }
 
 func (u *UDPConn) SetDeadline(t time.Time) error      { return nil }
-func (u *UDPConn) SetReadDeadline(t time.Time) error   { return nil }
-func (u *UDPConn) SetWriteDeadline(t time.Time) error  { return nil }
+func (u *UDPConn) SetReadDeadline(t time.Time) error  { return nil }
+func (u *UDPConn) SetWriteDeadline(t time.Time) error { return nil }
 
 // handleInbound delivers an incoming datagram to this connection.
 func (u *UDPConn) handleInbound(payload []byte) {

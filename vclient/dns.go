@@ -128,8 +128,8 @@ func buildDNSQuery(id uint16, name string, qtype uint16) []byte {
 	qname := encodeDNSName(name)
 	question := make([]byte, len(qname)+4)
 	copy(question, qname)
-	binary.BigEndian.PutUint16(question[len(qname):], qtype)   // QTYPE
-	binary.BigEndian.PutUint16(question[len(qname)+2:], 1)     // QCLASS = IN
+	binary.BigEndian.PutUint16(question[len(qname):], qtype) // QTYPE
+	binary.BigEndian.PutUint16(question[len(qname)+2:], 1)   // QCLASS = IN
 
 	pkt := make([]byte, len(hdr)+len(question))
 	copy(pkt, hdr)

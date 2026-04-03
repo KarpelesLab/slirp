@@ -13,7 +13,7 @@ func TestSeqBefore(t *testing.T) {
 		{0, 1, true},
 		{0xFFFFFFFF, 0, true},  // wraparound: max is before 0
 		{0, 0xFFFFFFFF, false}, // 0 is after max
-		{0x80000000, 0, true}, // halfway point: int32(0x80000000) < 0
+		{0x80000000, 0, true},  // halfway point: int32(0x80000000) < 0
 		{0x7FFFFFFF, 0x80000000, true},
 	}
 	for _, tt := range tests {

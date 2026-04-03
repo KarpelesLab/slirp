@@ -57,9 +57,9 @@ func buildARPFrame(dstMAC, srcMAC [6]byte, oper uint16, senderMAC [6]byte, sende
 
 	arp := frame[14:]
 	binary.BigEndian.PutUint16(arp[0:2], 1)      // HTYPE: Ethernet
-	binary.BigEndian.PutUint16(arp[2:4], 0x0800)  // PTYPE: IPv4
-	arp[4] = 6                                     // HLEN
-	arp[5] = 4                                     // PLEN
+	binary.BigEndian.PutUint16(arp[2:4], 0x0800) // PTYPE: IPv4
+	arp[4] = 6                                   // HLEN
+	arp[5] = 4                                   // PLEN
 	binary.BigEndian.PutUint16(arp[6:8], oper)
 	copy(arp[8:14], senderMAC[:])
 	copy(arp[14:18], senderIP[:])

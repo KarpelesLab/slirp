@@ -83,10 +83,10 @@ func (c *Client) DHCP(ctx context.Context) error {
 func (c *Client) buildDHCPMessage(msgType byte, xid uint32, requestIP, serverIP [4]byte) []byte {
 	// DHCP message (minimum 300 bytes for BOOTP compatibility)
 	msg := make([]byte, 300)
-	msg[0] = 1    // op: BOOTREQUEST
-	msg[1] = 1    // htype: Ethernet
-	msg[2] = 6    // hlen: MAC length
-	msg[3] = 0    // hops
+	msg[0] = 1 // op: BOOTREQUEST
+	msg[1] = 1 // htype: Ethernet
+	msg[2] = 6 // hlen: MAC length
+	msg[3] = 0 // hops
 	binary.BigEndian.PutUint32(msg[4:8], xid)
 	// secs, flags
 	binary.BigEndian.PutUint16(msg[10:12], 0x8000) // broadcast flag
@@ -136,8 +136,8 @@ func (c *Client) buildDHCPMessage(msgType byte, xid uint32, requestIP, serverIP 
 func (c *Client) sendDHCPPacket(dhcpPayload []byte) error {
 	// Build UDP header
 	udpHdr := make([]byte, 8)
-	binary.BigEndian.PutUint16(udpHdr[0:2], 68)   // src port
-	binary.BigEndian.PutUint16(udpHdr[2:4], 67)   // dst port
+	binary.BigEndian.PutUint16(udpHdr[0:2], 68) // src port
+	binary.BigEndian.PutUint16(udpHdr[2:4], 67) // dst port
 	binary.BigEndian.PutUint16(udpHdr[4:6], uint16(8+len(dhcpPayload)))
 
 	// Build IP header
@@ -146,9 +146,9 @@ func (c *Client) sendDHCPPacket(dhcpPayload []byte) error {
 	ipHdr[0] = 0x45
 	binary.BigEndian.PutUint16(ipHdr[2:4], uint16(totalLen))
 	ipHdr[8] = 64
-	ipHdr[9] = 17 // UDP
-	copy(ipHdr[12:16], []byte{0, 0, 0, 0})             // src: 0.0.0.0
-	copy(ipHdr[16:20], []byte{255, 255, 255, 255})      // dst: broadcast
+	ipHdr[9] = 17                                  // UDP
+	copy(ipHdr[12:16], []byte{0, 0, 0, 0})         // src: 0.0.0.0
+	copy(ipHdr[16:20], []byte{255, 255, 255, 255}) // dst: broadcast
 	binary.BigEndian.PutUint16(ipHdr[10:12], 0)
 	binary.BigEndian.PutUint16(ipHdr[10:12], slirp.IPChecksum(ipHdr))
 

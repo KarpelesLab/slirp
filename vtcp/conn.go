@@ -20,7 +20,7 @@ type ConnConfig struct {
 	MSS        int
 
 	// RFC 7323
-	NoWindowScaling bool          // set true to disable window scaling (enabled by default)
+	NoWindowScaling  bool // set true to disable window scaling (enabled by default)
 	EnableTimestamps bool
 
 	// RFC 2018
@@ -174,18 +174,18 @@ func NewConn(cfg ConnConfig) *Conn {
 	}
 
 	c := &Conn{
-		localPort:  cfg.LocalPort,
-		remotePort: cfg.RemotePort,
-		localAddr:  cfg.LocalAddr,
-		remoteAddr: cfg.RemoteAddr,
-		writer:     cfg.Writer,
-		state:      StateClosed,
-		mss:        cfg.mss(),
-		sndWnd:     DefaultWindowSize,
-		cc:         newCongestionController(cfg.CongestionControl, uint32(cfg.mss())),
-		rto:        NewRTOCalculator(),
-		lastRecv:   time.Now(),
-		recvBufCap: recvBufCap,
+		localPort:   cfg.LocalPort,
+		remotePort:  cfg.RemotePort,
+		localAddr:   cfg.LocalAddr,
+		remoteAddr:  cfg.RemoteAddr,
+		writer:      cfg.Writer,
+		state:       StateClosed,
+		mss:         cfg.mss(),
+		sndWnd:      DefaultWindowSize,
+		cc:          newCongestionController(cfg.CongestionControl, uint32(cfg.mss())),
+		rto:         NewRTOCalculator(),
+		lastRecv:    time.Now(),
+		recvBufCap:  recvBufCap,
 		established: make(chan struct{}),
 		finRecvd:    make(chan struct{}),
 
@@ -1167,7 +1167,7 @@ func (c *Conn) startTimeWait() {
 
 func (c *Conn) startKeepalive() {
 	c.stopKeepalive()
-		c.stopPersist()
+	c.stopPersist()
 	c.keepaliveTimer = time.AfterFunc(c.keepaliveIntv, c.onKeepalive)
 }
 
@@ -1352,7 +1352,7 @@ func (c *Conn) Abort() [][]byte {
 	c.closed.Store(true)
 	c.stopRTO()
 	c.stopKeepalive()
-		c.stopPersist()
+	c.stopPersist()
 
 	var pkts [][]byte
 	if wasEstablished && c.sendBuf != nil && c.recvBuf != nil {
@@ -1377,8 +1377,8 @@ func (c *Conn) Abort() [][]byte {
 
 // --- net.Conn interface ---
 
-func (c *Conn) LocalAddr() net.Addr    { return c.localAddr }
-func (c *Conn) RemoteAddr() net.Addr   { return c.remoteAddr }
+func (c *Conn) LocalAddr() net.Addr   { return c.localAddr }
+func (c *Conn) RemoteAddr() net.Addr  { return c.remoteAddr }
 func (c *Conn) Writer() SegmentWriter { return c.writer }
 
 // SetupForHandshake puts the connection into SYN-SENT state with the given ISN,

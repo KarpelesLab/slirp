@@ -98,8 +98,8 @@ func buildTestDNSResponse(id uint16, name string, ips []net.IP) []byte {
 	// Header
 	hdr := make([]byte, 12)
 	binary.BigEndian.PutUint16(hdr[0:2], id)
-	binary.BigEndian.PutUint16(hdr[2:4], 0x8180) // QR=1, RD=1, RA=1, RCODE=0
-	binary.BigEndian.PutUint16(hdr[4:6], 1)       // QDCOUNT
+	binary.BigEndian.PutUint16(hdr[2:4], 0x8180)           // QR=1, RD=1, RA=1, RCODE=0
+	binary.BigEndian.PutUint16(hdr[4:6], 1)                // QDCOUNT
 	binary.BigEndian.PutUint16(hdr[6:8], uint16(len(ips))) // ANCOUNT
 	buf = append(buf, hdr...)
 
@@ -117,8 +117,8 @@ func buildTestDNSResponse(id uint16, name string, ips []net.IP) []byte {
 		// Use compression pointer to question name
 		buf = append(buf, 0xC0, 12) // pointer to offset 12
 		var rec [10]byte
-		binary.BigEndian.PutUint16(rec[0:2], 1)  // TYPE A
-		binary.BigEndian.PutUint16(rec[2:4], 1)  // CLASS IN
+		binary.BigEndian.PutUint16(rec[0:2], 1)   // TYPE A
+		binary.BigEndian.PutUint16(rec[2:4], 1)   // CLASS IN
 		binary.BigEndian.PutUint32(rec[4:8], 300) // TTL
 		binary.BigEndian.PutUint16(rec[8:10], 4)  // RDLENGTH
 		buf = append(buf, rec[:]...)
@@ -200,7 +200,7 @@ func TestParseDNSResponseMalformedQuestion(t *testing.T) {
 	hdr := make([]byte, 12)
 	binary.BigEndian.PutUint16(hdr[0:2], 0x1234)
 	binary.BigEndian.PutUint16(hdr[2:4], 0x8000) // QR=1
-	binary.BigEndian.PutUint16(hdr[4:6], 1)       // QDCOUNT = 1
+	binary.BigEndian.PutUint16(hdr[4:6], 1)      // QDCOUNT = 1
 	// Only append partial label - no terminating zero and no QTYPE/QCLASS
 	data := append(hdr, 5, 'h', 'e', 'l', 'l')
 	_, err := parseDNSResponse(data, 0x1234)

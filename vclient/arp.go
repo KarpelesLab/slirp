@@ -152,14 +152,14 @@ func (c *Client) sendARPRequest(targetIP [4]byte) error {
 	// ARP
 	arp := frame[14:]
 	binary.BigEndian.PutUint16(arp[0:2], 1)      // Hardware type: Ethernet
-	binary.BigEndian.PutUint16(arp[2:4], 0x0800)  // Protocol type: IPv4
-	arp[4] = 6                                     // HLEN
-	arp[5] = 4                                     // PLEN
-	binary.BigEndian.PutUint16(arp[6:8], 1)        // Operation: Request
-	copy(arp[8:14], c.mac[:])                      // Sender MAC
-	copy(arp[14:18], localIP[:])                   // Sender IP
+	binary.BigEndian.PutUint16(arp[2:4], 0x0800) // Protocol type: IPv4
+	arp[4] = 6                                   // HLEN
+	arp[5] = 4                                   // PLEN
+	binary.BigEndian.PutUint16(arp[6:8], 1)      // Operation: Request
+	copy(arp[8:14], c.mac[:])                    // Sender MAC
+	copy(arp[14:18], localIP[:])                 // Sender IP
 	// Target MAC: 00:00:00:00:00:00 (unknown)
-	copy(arp[24:28], targetIP[:])                  // Target IP
+	copy(arp[24:28], targetIP[:]) // Target IP
 
 	return w(frame)
 }

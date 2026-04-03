@@ -4,12 +4,12 @@ import "encoding/binary"
 
 // TCP option kinds.
 const (
-	OptEnd      byte = 0
-	OptNOP      byte = 1
-	OptMSS      byte = 2
-	OptWScale   byte = 3
-	OptSACKPerm byte = 4
-	OptSACK     byte = 5
+	OptEnd       byte = 0
+	OptNOP       byte = 1
+	OptMSS       byte = 2
+	OptWScale    byte = 3
+	OptSACKPerm  byte = 4
+	OptSACK      byte = 5
 	OptTimestamp byte = 8
 )
 

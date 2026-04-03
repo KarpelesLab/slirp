@@ -471,7 +471,7 @@ func TestRFC9293_SequenceValidation(t *testing.T) {
 	server := NewConn(ConnConfig{
 		LocalPort: 9000, RemotePort: 50000,
 		Writer: func(seg []byte) error { return nil },
-		MSS: 1460, RecvBufSize: 4096,
+		MSS:    1460, RecvBufSize: 4096,
 	})
 
 	syn := Segment{SrcPort: 50000, DstPort: 9000, Seq: 1000, Flags: FlagSYN, Window: 65535}
@@ -501,7 +501,7 @@ func TestRFC9293_RSTValidation(t *testing.T) {
 	server := NewConn(ConnConfig{
 		LocalPort: 9000, RemotePort: 50000,
 		Writer: func(seg []byte) error { return nil },
-		MSS: 1460,
+		MSS:    1460,
 	})
 
 	syn := Segment{SrcPort: 50000, DstPort: 9000, Seq: 1000, Flags: FlagSYN, Window: 65535}
@@ -527,7 +527,7 @@ func TestRFC9293_SYNInEstablished(t *testing.T) {
 	server := NewConn(ConnConfig{
 		LocalPort: 9000, RemotePort: 50000,
 		Writer: func(seg []byte) error { return nil },
-		MSS: 1460,
+		MSS:    1460,
 	})
 
 	syn := Segment{SrcPort: 50000, DstPort: 9000, Seq: 1000, Flags: FlagSYN, Window: 65535}
@@ -555,7 +555,7 @@ func TestRFC9293_ACKRequired(t *testing.T) {
 	server := NewConn(ConnConfig{
 		LocalPort: 9000, RemotePort: 50000,
 		Writer: func(seg []byte) error { return nil },
-		MSS: 1460,
+		MSS:    1460,
 	})
 
 	syn := Segment{SrcPort: 50000, DstPort: 9000, Seq: 1000, Flags: FlagSYN, Window: 65535}
@@ -699,7 +699,7 @@ func TestRFC9293_DataInSYN(t *testing.T) {
 	server := NewConn(ConnConfig{
 		LocalPort: 9000, RemotePort: 50000,
 		Writer: func(seg []byte) error { return nil },
-		MSS: 1460,
+		MSS:    1460,
 	})
 
 	// SYN with payload data

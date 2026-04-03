@@ -158,9 +158,9 @@ func TestHandlePacket_UnknownProtocol(t *testing.T) {
 
 	// Create a minimal valid IPv4 packet with protocol 1 (ICMP)
 	packet := make([]byte, 20)
-	packet[0] = 0x45 // Version 4, IHL 5
+	packet[0] = 0x45                            // Version 4, IHL 5
 	binary.BigEndian.PutUint16(packet[2:4], 20) // Total length
-	packet[9] = 1 // Protocol: ICMP (unsupported)
+	packet[9] = 1                               // Protocol: ICMP (unsupported)
 	copy(packet[12:16], []byte{192, 168, 1, 1}) // Source IP
 	copy(packet[16:20], []byte{8, 8, 8, 8})     // Dest IP
 
@@ -378,8 +378,8 @@ func TestHandlePacket_IPv6Routing(t *testing.T) {
 	binary.BigEndian.PutUint16(packet[40:42], 54321) // src port
 	binary.BigEndian.PutUint16(packet[42:44], uint16(serverPort))
 	binary.BigEndian.PutUint32(packet[44:48], 1000) // seq
-	packet[52] = 0x50                                // data offset
-	packet[53] = 0x02                                // SYN
+	packet[52] = 0x50                               // data offset
+	packet[53] = 0x02                               // SYN
 
 	err = s.HandlePacket(0, clientMAC, gwMAC, packet, writer)
 	if err != nil {
@@ -546,17 +546,17 @@ func TestConcurrentAccess(t *testing.T) {
 			defer wg.Done()
 			// Create a minimal TCP SYN packet
 			packet := make([]byte, 40)
-			packet[0] = 0x45 // Version 4, IHL 5
+			packet[0] = 0x45                            // Version 4, IHL 5
 			binary.BigEndian.PutUint16(packet[2:4], 40) // Total length
-			packet[9] = 6 // Protocol: TCP
-			copy(packet[12:16], []byte{127, 0, 0, 1})      // Source IP (localhost)
-			copy(packet[16:20], []byte{127, 0, 0, 1})      // Dest IP (localhost)
+			packet[9] = 6                               // Protocol: TCP
+			copy(packet[12:16], []byte{127, 0, 0, 1})   // Source IP (localhost)
+			copy(packet[16:20], []byte{127, 0, 0, 1})   // Dest IP (localhost)
 
 			// TCP header
-			binary.BigEndian.PutUint16(packet[20:22], port) // Source port
-			binary.BigEndian.PutUint16(packet[22:24], uint16(serverAddr.Port))   // Dest port
-			packet[32] = 0x50 // Data offset
-			packet[33] = 0x02 // SYN flag
+			binary.BigEndian.PutUint16(packet[20:22], port)                    // Source port
+			binary.BigEndian.PutUint16(packet[22:24], uint16(serverAddr.Port)) // Dest port
+			packet[32] = 0x50                                                  // Data offset
+			packet[33] = 0x02                                                  // SYN flag
 
 			_ = s.HandlePacket(0, clientMAC, gwMAC, packet, writer)
 		}(uint16(10000 + i))

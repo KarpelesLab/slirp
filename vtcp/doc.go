@@ -76,10 +76,10 @@ const (
 
 // Default values.
 const (
-	DefaultMSS       = 1460
+	DefaultMSS        = 1460
 	DefaultWindowSize = 65535
-	DefaultSendBuf   = 1 << 20 // 1 MB
-	DefaultRecvBuf   = 1 << 20 // 1 MB
+	DefaultSendBuf    = 1 << 20 // 1 MB
+	DefaultRecvBuf    = 1 << 20 // 1 MB
 
 	DefaultRTO = time.Second
 	MinRTO     = 200 * time.Millisecond

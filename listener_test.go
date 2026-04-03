@@ -433,3 +433,336 @@ func TestListenerAcceptAfterClose(t *testing.T) {
 		t.Error("Accept after Close should return error")
 	}
 }
+
+func TestVirtualConnHandleInboundRST(t *testing.T) {
+	s := New()
+
+	listener, err := s.Listen("tcp", "10.0.0.1:9001")
+	if err != nil {
+		t.Fatalf("Listen failed: %v", err)
+	}
+	defer listener.Close()
+
+	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
+	writer := func(b []byte) error { return nil }
+
+	srcIP := [4]byte{192, 168, 1, 50}
+	dstIP := [4]byte{10, 0, 0, 1}
+	srcPort := uint16(45001)
+	dstPort := uint16(9001)
+
+	// Send SYN to create the virtual connection
+	synPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 1000, 0, 0x02, nil)
+	err = s.HandlePacket(0, clientMAC, gwMAC, synPkt, writer)
+	if err != nil {
+		t.Fatalf("HandlePacket SYN failed: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Find the virtual connection
+	k := key{ns: 0, srcIP: srcIP, srcPort: srcPort, dstIP: dstIP, dstPort: dstPort}
+	s.mu.RLock()
+	vc := s.virtTCP[k]
+	s.mu.RUnlock()
+
+	if vc == nil {
+		t.Fatal("virtual connection should have been created")
+	}
+
+	// Now send RST
+	rstPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 1001, vc.seq+1, 0x04, nil)
+	err = s.HandlePacket(0, clientMAC, gwMAC, rstPkt, writer)
+	if err != nil {
+		t.Fatalf("HandlePacket RST failed: %v", err)
+	}
+
+	// VirtualConn should be closed
+	if !vc.closed.Load() {
+		t.Error("virtual connection should be closed after RST")
+	}
+
+	// Read should return EOF
+	buf := make([]byte, 100)
+	_, err = vc.Read(buf)
+	if err != io.EOF {
+		t.Errorf("Read after RST should return EOF, got %v", err)
+	}
+}
+
+func TestVirtualConnHandleInboundFIN(t *testing.T) {
+	s := New()
+
+	listener, err := s.Listen("tcp", "10.0.0.1:9002")
+	if err != nil {
+		t.Fatalf("Listen failed: %v", err)
+	}
+	defer listener.Close()
+
+	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
+
+	var receivedFrames [][]byte
+	var mu sync.Mutex
+	writer := func(b []byte) error {
+		mu.Lock()
+		frame := make([]byte, len(b))
+		copy(frame, b)
+		receivedFrames = append(receivedFrames, frame)
+		mu.Unlock()
+		return nil
+	}
+
+	srcIP := [4]byte{192, 168, 1, 50}
+	dstIP := [4]byte{10, 0, 0, 1}
+	srcPort := uint16(45002)
+	dstPort := uint16(9002)
+
+	// Accept in the background
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 1024)
+		// Read will eventually return EOF when FIN is processed
+		_, _ = conn.Read(buf)
+	}()
+
+	// SYN
+	synPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 2000, 0, 0x02, nil)
+	_ = s.HandlePacket(0, clientMAC, gwMAC, synPkt, writer)
+	time.Sleep(50 * time.Millisecond)
+
+	// Get server seq from SYN-ACK
+	mu.Lock()
+	if len(receivedFrames) < 1 {
+		mu.Unlock()
+		t.Fatal("expected SYN-ACK")
+	}
+	synAckFrame := receivedFrames[0]
+	mu.Unlock()
+	tcpHeader := synAckFrame[14+20:]
+	serverSeq := binary.BigEndian.Uint32(tcpHeader[4:8])
+
+	// ACK to complete handshake
+	ackPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 2001, serverSeq+1, 0x10, nil)
+	_ = s.HandlePacket(0, clientMAC, gwMAC, ackPkt, writer)
+	time.Sleep(50 * time.Millisecond)
+
+	// Send FIN
+	finPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 2001, serverSeq+1, 0x01, nil)
+	_ = s.HandlePacket(0, clientMAC, gwMAC, finPkt, writer)
+	time.Sleep(50 * time.Millisecond)
+
+	// Check that a FIN-ACK was sent
+	mu.Lock()
+	finAckFound := false
+	for _, frame := range receivedFrames {
+		if len(frame) >= 14+20+20 {
+			hdr := frame[14+20:]
+			flags := hdr[13]
+			if flags == 0x11 { // FIN+ACK
+				finAckFound = true
+				break
+			}
+		}
+	}
+	mu.Unlock()
+
+	if !finAckFound {
+		t.Error("expected FIN-ACK to be sent in response to FIN")
+	}
+
+	// Server goroutine should complete (Read returns EOF)
+	select {
+	case <-serverDone:
+	case <-time.After(1 * time.Second):
+		t.Error("timeout waiting for server to finish after FIN")
+	}
+}
+
+func TestVirtualConnHandleInboundData(t *testing.T) {
+	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
+
+	var receivedFrames [][]byte
+	var mu sync.Mutex
+	writer := func(b []byte) error {
+		mu.Lock()
+		frame := make([]byte, len(b))
+		copy(frame, b)
+		receivedFrames = append(receivedFrames, frame)
+		mu.Unlock()
+		return nil
+	}
+
+	localIP := [4]byte{10, 0, 0, 1}
+	remoteIP := [4]byte{192, 168, 1, 50}
+
+	vc := newVirtualConn(localIP, 9003, remoteIP, 45003, clientMAC, gwMAC, writer)
+	vc.established = true
+	vc.clientSeq = 5001
+	vc.ack = 5001
+	vc.seq = 7000
+
+	// Create a data packet (from remote -> local perspective, so src=remote, dst=local)
+	payload := []byte("hello from client")
+	dataPkt := createTCPPacket(remoteIP, localIP, 45003, 9003, 5001, 7000, 0x18, payload)
+	err := vc.handleInbound(dataPkt)
+	if err != nil {
+		t.Fatalf("handleInbound data failed: %v", err)
+	}
+
+	// Verify data was queued in recvBuf
+	buf := make([]byte, 100)
+	n, err := vc.Read(buf)
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+	if string(buf[:n]) != "hello from client" {
+		t.Errorf("expected %q, got %q", "hello from client", string(buf[:n]))
+	}
+
+	// Verify an ACK was sent
+	mu.Lock()
+	ackSent := false
+	for _, frame := range receivedFrames {
+		if len(frame) >= 14+20+20 {
+			hdr := frame[14+20:]
+			flags := hdr[13]
+			if (flags & 0x10) != 0 { // ACK
+				ackSent = true
+				break
+			}
+		}
+	}
+	mu.Unlock()
+
+	if !ackSent {
+		t.Error("expected ACK to be sent after receiving data")
+	}
+
+	// Verify clientSeq advanced
+	vc.mu.Lock()
+	cs := vc.clientSeq
+	vc.mu.Unlock()
+	if cs != 5001+uint32(len(payload)) {
+		t.Errorf("clientSeq should be %d, got %d", 5001+uint32(len(payload)), cs)
+	}
+}
+
+func TestVirtualConnCloseEstablished(t *testing.T) {
+	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
+
+	var sentFrames [][]byte
+	var mu sync.Mutex
+	writer := func(b []byte) error {
+		mu.Lock()
+		frame := make([]byte, len(b))
+		copy(frame, b)
+		sentFrames = append(sentFrames, frame)
+		mu.Unlock()
+		return nil
+	}
+
+	localIP := [4]byte{10, 0, 0, 1}
+	remoteIP := [4]byte{192, 168, 1, 50}
+
+	vc := newVirtualConn(localIP, 9004, remoteIP, 45004, clientMAC, gwMAC, writer)
+	vc.established = true
+	vc.seq = 8000
+	vc.ack = 6000
+
+	err := vc.Close()
+	if err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	// Should send FIN when established
+	mu.Lock()
+	finSent := false
+	for _, frame := range sentFrames {
+		if len(frame) >= 14+20+20 {
+			hdr := frame[14+20:]
+			flags := hdr[13]
+			if flags == 0x11 { // FIN+ACK
+				finSent = true
+				break
+			}
+		}
+	}
+	mu.Unlock()
+
+	if !finSent {
+		t.Error("Close() on established connection should send FIN+ACK")
+	}
+
+	// Close again should be a no-op
+	err = vc.Close()
+	if err != nil {
+		t.Fatalf("second Close failed: %v", err)
+	}
+}
+
+func TestVirtualConnCloseNotEstablished(t *testing.T) {
+	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
+
+	var sentFrames [][]byte
+	var mu sync.Mutex
+	writer := func(b []byte) error {
+		mu.Lock()
+		frame := make([]byte, len(b))
+		copy(frame, b)
+		sentFrames = append(sentFrames, frame)
+		mu.Unlock()
+		return nil
+	}
+
+	localIP := [4]byte{10, 0, 0, 1}
+	remoteIP := [4]byte{192, 168, 1, 50}
+
+	vc := newVirtualConn(localIP, 9005, remoteIP, 45005, clientMAC, gwMAC, writer)
+	// Not established
+
+	err := vc.Close()
+	if err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	// Should NOT send FIN when not established
+	mu.Lock()
+	frameCount := len(sentFrames)
+	mu.Unlock()
+
+	if frameCount != 0 {
+		t.Error("Close() on non-established connection should not send any frames")
+	}
+}
+
+func TestVirtualConnSetDeadlines(t *testing.T) {
+	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
+	writer := func(b []byte) error { return nil }
+
+	localIP := [4]byte{10, 0, 0, 1}
+	remoteIP := [4]byte{192, 168, 1, 50}
+
+	vc := newVirtualConn(localIP, 9006, remoteIP, 45006, clientMAC, gwMAC, writer)
+
+	if err := vc.SetDeadline(time.Now()); err != nil {
+		t.Errorf("SetDeadline should return nil, got %v", err)
+	}
+	if err := vc.SetReadDeadline(time.Now()); err != nil {
+		t.Errorf("SetReadDeadline should return nil, got %v", err)
+	}
+	if err := vc.SetWriteDeadline(time.Now()); err != nil {
+		t.Errorf("SetWriteDeadline should return nil, got %v", err)
+	}
+}

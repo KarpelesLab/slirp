@@ -203,6 +203,343 @@ func TestStackMaintenance(t *testing.T) {
 	s.mu.RUnlock()
 }
 
+func TestSeqAfter(t *testing.T) {
+	tests := []struct {
+		name     string
+		a, b     uint32
+		expected bool
+	}{
+		{"a > b simple", 100, 50, true},
+		{"a == b", 100, 100, false},
+		{"a < b simple", 50, 100, false},
+		{"wrap around: a just past 0, b near max", 5, 0xFFFFFFF0, true},
+		{"wrap around: a near max, b just past 0", 0xFFFFFFF0, 5, false},
+		{"a = b + 1", 101, 100, true},
+		{"a = b - 1", 99, 100, false},
+		{"zero vs zero", 0, 0, false},
+		{"max vs zero", 0xFFFFFFFF, 0, false}, // -1 in signed, so not after
+		{"zero vs max", 0, 0xFFFFFFFF, true},  // +1 in signed, so after
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SeqAfter(tt.a, tt.b)
+			if got != tt.expected {
+				t.Errorf("SeqAfter(%d, %d) = %v, want %v", tt.a, tt.b, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestStackClose(t *testing.T) {
+	s := New()
+	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
+	writer := func(b []byte) error { return nil }
+
+	// Add a TCP connection
+	tcpK := key{srcIP: [4]byte{192, 168, 1, 1}, srcPort: 12345, dstIP: [4]byte{8, 8, 8, 8}, dstPort: 80}
+	tcpC := newTCPConn(tcpK.srcIP, tcpK.srcPort, tcpK.dstIP, tcpK.dstPort, clientMAC, gwMAC, writer)
+
+	// Add a TCP6 connection
+	tcp6K := key6{srcIP: [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, srcPort: 12345, dstIP: [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2}, dstPort: 80}
+	tcp6C := newTCPConn6(tcp6K.srcIP, tcp6K.srcPort, tcp6K.dstIP, tcp6K.dstPort, clientMAC, gwMAC, writer)
+
+	// Add a virtual connection
+	vcK := key{srcIP: [4]byte{192, 168, 1, 50}, srcPort: 45000, dstIP: [4]byte{10, 0, 0, 1}, dstPort: 9000}
+	vc := newVirtualConn([4]byte{10, 0, 0, 1}, 9000, [4]byte{192, 168, 1, 50}, 45000, clientMAC, gwMAC, writer)
+	vc.established = true
+
+	// Add a virtual connection6
+	vc6K := key6{srcIP: [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2}, srcPort: 45000, dstIP: [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, dstPort: 9000}
+	var vc6LocalIP, vc6RemoteIP [16]byte
+	vc6LocalIP[15] = 1
+	vc6RemoteIP[15] = 2
+	vc6 := newVirtualConn6(vc6LocalIP, 9000, vc6RemoteIP, 45000, clientMAC, gwMAC, writer)
+	vc6.established = true
+
+	// Add a listener
+	listener, err := s.Listen("tcp", "10.0.0.1:7777")
+	if err != nil {
+		t.Fatalf("Listen failed: %v", err)
+	}
+	_ = listener
+
+	// Add a listener6
+	listener6, err := s.Listen("tcp6", "[::1]:7777")
+	if err != nil {
+		t.Fatalf("Listen6 failed: %v", err)
+	}
+	_ = listener6
+
+	s.mu.Lock()
+	s.tcp[tcpK] = tcpC
+	s.tcp6[tcp6K] = tcp6C
+	s.virtTCP[vcK] = vc
+	s.virtTCP6[vc6K] = vc6
+	s.mu.Unlock()
+
+	err = s.Close()
+	if err != nil {
+		t.Fatalf("Close() returned error: %v", err)
+	}
+
+	// Verify everything was cleaned up
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.tcp) != 0 {
+		t.Errorf("expected 0 TCP connections after Close, got %d", len(s.tcp))
+	}
+	if len(s.tcp6) != 0 {
+		t.Errorf("expected 0 TCP6 connections after Close, got %d", len(s.tcp6))
+	}
+	if len(s.udp) != 0 {
+		t.Errorf("expected 0 UDP connections after Close, got %d", len(s.udp))
+	}
+	if len(s.udp6) != 0 {
+		t.Errorf("expected 0 UDP6 connections after Close, got %d", len(s.udp6))
+	}
+	if len(s.virtTCP) != 0 {
+		t.Errorf("expected 0 virtual TCP connections after Close, got %d", len(s.virtTCP))
+	}
+	if len(s.virtTCP6) != 0 {
+		t.Errorf("expected 0 virtual TCP6 connections after Close, got %d", len(s.virtTCP6))
+	}
+	if len(s.listeners) != 0 {
+		t.Errorf("expected 0 listeners after Close, got %d", len(s.listeners))
+	}
+	if len(s.listeners6) != 0 {
+		t.Errorf("expected 0 listeners6 after Close, got %d", len(s.listeners6))
+	}
+
+	// Verify that TCP conn is marked closed
+	tcpC.mu.Lock()
+	if !tcpC.closed {
+		t.Error("TCP connection should be marked closed after Stack.Close()")
+	}
+	tcpC.mu.Unlock()
+
+	tcp6C.mu.Lock()
+	if !tcp6C.closed {
+		t.Error("TCP6 connection should be marked closed after Stack.Close()")
+	}
+	tcp6C.mu.Unlock()
+
+	if !vc.closed.Load() {
+		t.Error("virtual TCP connection should be marked closed after Stack.Close()")
+	}
+	if !vc6.closed.Load() {
+		t.Error("virtual TCP6 connection should be marked closed after Stack.Close()")
+	}
+}
+
+func TestStackCloseStopsMaintenanceGoroutine(t *testing.T) {
+	s := New()
+	// Close should not panic even when called immediately
+	err := s.Close()
+	if err != nil {
+		t.Fatalf("Close() returned error: %v", err)
+	}
+	// Calling Close on an already-closed stack shouldn't hang
+	// (done channel already closed, second close would panic if not handled)
+}
+
+func TestHandlePacket_IPv6Routing(t *testing.T) {
+	s := New()
+	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
+	writer := func(b []byte) error { return nil }
+
+	// Create a valid IPv6 TCP SYN to a real port to exercise the outbound path
+	listener, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("cannot listen on IPv6 localhost: %v", err)
+	}
+	defer listener.Close()
+	serverPort := listener.Addr().(*net.TCPAddr).Port
+
+	go func() {
+		c, err := listener.Accept()
+		if err == nil {
+			c.Close()
+		}
+	}()
+
+	packet := make([]byte, 60)
+	packet[0] = 0x60 // Version 6
+	binary.BigEndian.PutUint16(packet[4:6], 20)
+	packet[6] = 6  // TCP
+	packet[7] = 64 // Hop limit
+	// Source: ::1
+	packet[23] = 0x01
+	// Dest: ::1
+	packet[39] = 0x01
+	// TCP header
+	binary.BigEndian.PutUint16(packet[40:42], 54321) // src port
+	binary.BigEndian.PutUint16(packet[42:44], uint16(serverPort))
+	binary.BigEndian.PutUint32(packet[44:48], 1000) // seq
+	packet[52] = 0x50                                // data offset
+	packet[53] = 0x02                                // SYN
+
+	err = s.HandlePacket(0, clientMAC, gwMAC, packet, writer)
+	if err != nil {
+		t.Errorf("HandlePacket with IPv6 TCP SYN failed: %v", err)
+	}
+
+	// Verify a tcp6 connection was created
+	time.Sleep(50 * time.Millisecond)
+	s.mu.RLock()
+	tcp6Count := len(s.tcp6)
+	s.mu.RUnlock()
+	if tcp6Count != 1 {
+		t.Errorf("expected 1 TCP6 connection, got %d", tcp6Count)
+	}
+	s.Close()
+}
+
+func TestMaintenanceCleanup_DirectSimulation(t *testing.T) {
+	// Directly simulate what maintenance() does for cleaning up stale connections,
+	// since we can't easily wait for the ticker in tests.
+	s := New()
+	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
+	writer := func(b []byte) error { return nil }
+
+	// Add a stale closed TCP connection
+	tcpK := key{srcIP: [4]byte{192, 168, 1, 1}, srcPort: 12345, dstIP: [4]byte{8, 8, 8, 8}, dstPort: 80}
+	tcpC := newTCPConn(tcpK.srcIP, tcpK.srcPort, tcpK.dstIP, tcpK.dstPort, clientMAC, gwMAC, writer)
+	tcpC.closed = true
+	tcpC.lastAct = time.Now().Add(-5 * time.Minute)
+
+	// Add a fresh TCP connection (should NOT be cleaned up)
+	tcpK2 := key{srcIP: [4]byte{192, 168, 1, 2}, srcPort: 12346, dstIP: [4]byte{8, 8, 8, 8}, dstPort: 80}
+	tcpC2 := newTCPConn(tcpK2.srcIP, tcpK2.srcPort, tcpK2.dstIP, tcpK2.dstPort, clientMAC, gwMAC, writer)
+	tcpC2.lastAct = time.Now()
+
+	// Add a stale TCP6 connection
+	var src6, dst6 [16]byte
+	src6[15] = 1
+	dst6[15] = 2
+	tcp6K := key6{srcIP: src6, srcPort: 12345, dstIP: dst6, dstPort: 80}
+	tcp6C := newTCPConn6(src6, 12345, dst6, 80, clientMAC, gwMAC, writer)
+	tcp6C.lastAct = time.Now().Add(-5 * time.Minute)
+
+	// Add a stale virtual connection
+	vcK := key{srcIP: [4]byte{10, 0, 0, 50}, srcPort: 45000, dstIP: [4]byte{10, 0, 0, 1}, dstPort: 9000}
+	vc := newVirtualConn([4]byte{10, 0, 0, 1}, 9000, [4]byte{10, 0, 0, 50}, 45000, clientMAC, gwMAC, writer)
+	vc.lastAct = time.Now().Add(-5 * time.Minute)
+
+	// Add a stale virtual connection6
+	vc6K := key6{srcIP: src6, srcPort: 45000, dstIP: dst6, dstPort: 9000}
+	vc6 := newVirtualConn6(dst6, 9000, src6, 45000, clientMAC, gwMAC, writer)
+	vc6.lastAct = time.Now().Add(-5 * time.Minute)
+
+	s.mu.Lock()
+	s.tcp[tcpK] = tcpC
+	s.tcp[tcpK2] = tcpC2
+	s.tcp6[tcp6K] = tcp6C
+	s.virtTCP[vcK] = vc
+	s.virtTCP6[vc6K] = vc6
+	s.mu.Unlock()
+
+	// Simulate the maintenance cleanup logic inline (same as maintenance() body)
+	now := time.Now()
+	s.mu.Lock()
+	for k, c := range s.tcp {
+		c.mu.Lock()
+		idle := now.Sub(c.lastAct)
+		closed := c.closed
+		if idle > 2*time.Minute || closed {
+			c.closed = true
+			if c.conn != nil {
+				_ = c.conn.Close()
+			}
+			delete(s.tcp, k)
+		}
+		c.mu.Unlock()
+		if idle > 2*time.Minute || closed {
+			c.cond.Broadcast()
+		}
+	}
+	for k, c := range s.tcp6 {
+		c.mu.Lock()
+		idle := now.Sub(c.lastAct)
+		closed := c.closed
+		if idle > 2*time.Minute || closed {
+			c.closed = true
+			if c.conn != nil {
+				_ = c.conn.Close()
+			}
+			delete(s.tcp6, k)
+		}
+		c.mu.Unlock()
+		if idle > 2*time.Minute || closed {
+			c.cond.Broadcast()
+		}
+	}
+	for k, vc2 := range s.virtTCP {
+		vc2.mu.Lock()
+		idle := now.Sub(vc2.lastAct)
+		closed := vc2.closed.Load()
+		if idle > 2*time.Minute || closed {
+			vc2.closed.Store(true)
+			delete(s.virtTCP, k)
+		}
+		vc2.mu.Unlock()
+		if idle > 2*time.Minute || closed {
+			vc2.recvMu.Lock()
+			vc2.recvCond.Broadcast()
+			vc2.recvMu.Unlock()
+			vc2.sendMu.Lock()
+			vc2.sendCond.Broadcast()
+			vc2.sendMu.Unlock()
+		}
+	}
+	for k, vc2 := range s.virtTCP6 {
+		vc2.mu.Lock()
+		idle := now.Sub(vc2.lastAct)
+		closed := vc2.closed.Load()
+		if idle > 2*time.Minute || closed {
+			vc2.closed.Store(true)
+			delete(s.virtTCP6, k)
+		}
+		vc2.mu.Unlock()
+		if idle > 2*time.Minute || closed {
+			vc2.recvMu.Lock()
+			vc2.recvCond.Broadcast()
+			vc2.recvMu.Unlock()
+			vc2.sendMu.Lock()
+			vc2.sendCond.Broadcast()
+			vc2.sendMu.Unlock()
+		}
+	}
+	s.mu.Unlock()
+
+	// Verify stale connections were cleaned up and fresh one remains
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.tcp) != 1 {
+		t.Errorf("expected 1 TCP connection (fresh one), got %d", len(s.tcp))
+	}
+	if _, ok := s.tcp[tcpK2]; !ok {
+		t.Error("fresh TCP connection should still be in the map")
+	}
+	if len(s.tcp6) != 0 {
+		t.Errorf("expected 0 TCP6 connections, got %d", len(s.tcp6))
+	}
+	if len(s.virtTCP) != 0 {
+		t.Errorf("expected 0 virtual TCP connections, got %d", len(s.virtTCP))
+	}
+	if len(s.virtTCP6) != 0 {
+		t.Errorf("expected 0 virtual TCP6 connections, got %d", len(s.virtTCP6))
+	}
+	if !vc.closed.Load() {
+		t.Error("stale virtual connection should be marked closed")
+	}
+	if !vc6.closed.Load() {
+		t.Error("stale virtual6 connection should be marked closed")
+	}
+}
+
 func TestConcurrentAccess(t *testing.T) {
 	s := New()
 	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}

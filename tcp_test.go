@@ -451,6 +451,614 @@ func TestTCPConnKeepaliveReset(t *testing.T) {
 	}
 }
 
+func TestTCPConnHandleRST(t *testing.T) {
+	// Start a test server
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("cannot start test server: %v", err)
+	}
+	defer listener.Close()
+
+	serverAddr := listener.Addr().(*net.TCPAddr)
+	go func() {
+		c, err := listener.Accept()
+		if err == nil {
+			// Keep reading to detect close
+			buf := make([]byte, 1024)
+			for {
+				_, err := c.Read(buf)
+				if err != nil {
+					break
+				}
+			}
+			c.Close()
+		}
+	}()
+
+	srcIP := [4]byte{127, 0, 0, 1}
+	dstIP := [4]byte{127, 0, 0, 1}
+	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
+	writer := func(b []byte) error { return nil }
+
+	conn := newTCPConn(srcIP, 54322, dstIP, uint16(serverAddr.Port), clientMAC, gwMAC, writer)
+
+	// First establish connection with SYN
+	synPacket := createTCPPacket(srcIP, dstIP, 54322, uint16(serverAddr.Port), 1000, 0, 0x02, nil)
+	err = conn.handleOutbound(synPacket)
+	if err != nil {
+		t.Fatalf("SYN handleOutbound failed: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	if conn.conn == nil {
+		t.Fatal("connection should be established after SYN")
+	}
+
+	// Send RST
+	rstPacket := createTCPPacket(srcIP, dstIP, 54322, uint16(serverAddr.Port), 1001, conn.sSeq+1, 0x04, nil)
+	err = conn.handleOutbound(rstPacket)
+	if err != nil {
+		t.Fatalf("RST handleOutbound failed: %v", err)
+	}
+
+	conn.mu.Lock()
+	closed := conn.closed
+	conn.mu.Unlock()
+
+	if !closed {
+		t.Error("connection should be closed after RST")
+	}
+}
+
+func TestTCPConnACKHandshake(t *testing.T) {
+	// Start a test server
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("cannot start test server: %v", err)
+	}
+	defer listener.Close()
+
+	serverAddr := listener.Addr().(*net.TCPAddr)
+	go func() {
+		c, err := listener.Accept()
+		if err == nil {
+			c.Close()
+		}
+	}()
+
+	srcIP := [4]byte{127, 0, 0, 1}
+	dstIP := [4]byte{127, 0, 0, 1}
+	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
+
+	var receivedFrames [][]byte
+	var mu sync.Mutex
+	writer := func(b []byte) error {
+		mu.Lock()
+		frame := make([]byte, len(b))
+		copy(frame, b)
+		receivedFrames = append(receivedFrames, frame)
+		mu.Unlock()
+		return nil
+	}
+
+	conn := newTCPConn(srcIP, 54323, dstIP, uint16(serverAddr.Port), clientMAC, gwMAC, writer)
+
+	// Send SYN
+	synPacket := createTCPPacket(srcIP, dstIP, 54323, uint16(serverAddr.Port), 2000, 0, 0x02, nil)
+	err = conn.handleOutbound(synPacket)
+	if err != nil {
+		t.Fatalf("SYN handleOutbound failed: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	conn.mu.Lock()
+	sSeq := conn.sSeq
+	established := conn.established
+	conn.mu.Unlock()
+
+	if established {
+		t.Error("connection should not be established before ACK")
+	}
+
+	// Send ACK to complete handshake
+	ackPacket := createTCPPacket(srcIP, dstIP, 54323, uint16(serverAddr.Port), 2001, sSeq+1, 0x10, nil)
+	err = conn.handleOutbound(ackPacket)
+	if err != nil {
+		t.Fatalf("ACK handleOutbound failed: %v", err)
+	}
+
+	conn.mu.Lock()
+	established = conn.established
+	newSSeq := conn.sSeq
+	conn.mu.Unlock()
+
+	if !established {
+		t.Error("connection should be established after ACK")
+	}
+	if newSSeq != sSeq+1 {
+		t.Errorf("sSeq should have incremented from %d to %d, got %d", sSeq, sSeq+1, newSSeq)
+	}
+}
+
+func TestTCPConnDataForwardingAndACK(t *testing.T) {
+	// Start an echo server
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("cannot start test server: %v", err)
+	}
+	defer listener.Close()
+
+	serverAddr := listener.Addr().(*net.TCPAddr)
+	go func() {
+		c, err := listener.Accept()
+		if err == nil {
+			buf := make([]byte, 1024)
+			for {
+				n, err := c.Read(buf)
+				if err != nil {
+					break
+				}
+				c.Write(buf[:n])
+			}
+			c.Close()
+		}
+	}()
+
+	srcIP := [4]byte{127, 0, 0, 1}
+	dstIP := [4]byte{127, 0, 0, 1}
+	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
+
+	var receivedFrames [][]byte
+	var mu sync.Mutex
+	writer := func(b []byte) error {
+		mu.Lock()
+		frame := make([]byte, len(b))
+		copy(frame, b)
+		receivedFrames = append(receivedFrames, frame)
+		mu.Unlock()
+		return nil
+	}
+
+	conn := newTCPConn(srcIP, 54324, dstIP, uint16(serverAddr.Port), clientMAC, gwMAC, writer)
+
+	// SYN
+	synPacket := createTCPPacket(srcIP, dstIP, 54324, uint16(serverAddr.Port), 3000, 0, 0x02, nil)
+	_ = conn.handleOutbound(synPacket)
+	time.Sleep(50 * time.Millisecond)
+
+	conn.mu.Lock()
+	sSeq := conn.sSeq
+	conn.mu.Unlock()
+
+	// ACK to complete handshake
+	ackPacket := createTCPPacket(srcIP, dstIP, 54324, uint16(serverAddr.Port), 3001, sSeq+1, 0x10, nil)
+	_ = conn.handleOutbound(ackPacket)
+	time.Sleep(50 * time.Millisecond)
+
+	// Send data (PSH+ACK)
+	payload := []byte("Hello, echo server!")
+	conn.mu.Lock()
+	sSeqAfterHandshake := conn.sSeq
+	conn.mu.Unlock()
+
+	dataPacket := createTCPPacket(srcIP, dstIP, 54324, uint16(serverAddr.Port), 3001, sSeqAfterHandshake, 0x18, payload)
+	err = conn.handleOutbound(dataPacket)
+	if err != nil {
+		t.Fatalf("data handleOutbound failed: %v", err)
+	}
+
+	// Verify client seq advanced
+	conn.mu.Lock()
+	cSeq := conn.cSeq
+	conn.mu.Unlock()
+
+	if cSeq != 3001+uint32(len(payload)) {
+		t.Errorf("cSeq should be %d, got %d", 3001+uint32(len(payload)), cSeq)
+	}
+
+	// Wait for echo response via readFromRemote
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	frameCount := len(receivedFrames)
+	mu.Unlock()
+
+	// Should have received: SYN-ACK, ACK for data, and echo data frames
+	if frameCount < 2 {
+		t.Errorf("expected at least 2 frames (SYN-ACK + ACK), got %d", frameCount)
+	}
+}
+
+func TestTCPConnFINHandling(t *testing.T) {
+	// Start a server that closes immediately
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("cannot start test server: %v", err)
+	}
+	defer listener.Close()
+
+	serverAddr := listener.Addr().(*net.TCPAddr)
+	go func() {
+		c, err := listener.Accept()
+		if err == nil {
+			// Keep alive for a bit
+			time.Sleep(200 * time.Millisecond)
+			c.Close()
+		}
+	}()
+
+	srcIP := [4]byte{127, 0, 0, 1}
+	dstIP := [4]byte{127, 0, 0, 1}
+	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
+
+	var receivedFrames [][]byte
+	var mu sync.Mutex
+	writer := func(b []byte) error {
+		mu.Lock()
+		frame := make([]byte, len(b))
+		copy(frame, b)
+		receivedFrames = append(receivedFrames, frame)
+		mu.Unlock()
+		return nil
+	}
+
+	conn := newTCPConn(srcIP, 54325, dstIP, uint16(serverAddr.Port), clientMAC, gwMAC, writer)
+
+	// SYN
+	synPacket := createTCPPacket(srcIP, dstIP, 54325, uint16(serverAddr.Port), 4000, 0, 0x02, nil)
+	_ = conn.handleOutbound(synPacket)
+	time.Sleep(50 * time.Millisecond)
+
+	conn.mu.Lock()
+	sSeq := conn.sSeq
+	conn.mu.Unlock()
+
+	// Complete handshake
+	ackPacket := createTCPPacket(srcIP, dstIP, 54325, uint16(serverAddr.Port), 4001, sSeq+1, 0x10, nil)
+	_ = conn.handleOutbound(ackPacket)
+	time.Sleep(50 * time.Millisecond)
+
+	// Send FIN (client wants to close)
+	conn.mu.Lock()
+	sSeqNow := conn.sSeq
+	conn.mu.Unlock()
+
+	finPacket := createTCPPacket(srcIP, dstIP, 54325, uint16(serverAddr.Port), 4001, sSeqNow, 0x01, nil)
+	err = conn.handleOutbound(finPacket)
+	if err != nil {
+		t.Fatalf("FIN handleOutbound failed: %v", err)
+	}
+
+	conn.mu.Lock()
+	closed := conn.closed
+	cSeq := conn.cSeq
+	conn.mu.Unlock()
+
+	// Half-close: connection stays open for server responses
+	if closed {
+		t.Error("connection should NOT be fully closed after client FIN (half-close)")
+	}
+	// FIN consumes one sequence number
+	if cSeq != 4002 {
+		t.Errorf("cSeq should be 4002 after FIN, got %d", cSeq)
+	}
+
+	// Check that an ACK (not FIN-ACK) was sent back for the client's FIN
+	mu.Lock()
+	found := false
+	for _, frame := range receivedFrames {
+		if len(frame) >= 14+20+20 {
+			tcpHdr := frame[14+20:]
+			flags := tcpHdr[13]
+			if flags == 0x10 { // ACK only (half-close response)
+				found = true
+				break
+			}
+		}
+	}
+	mu.Unlock()
+
+	if !found {
+		t.Error("expected an ACK packet to be sent for client FIN (half-close)")
+	}
+}
+
+func TestTCPConnFINACKHandling(t *testing.T) {
+	// Test data+FIN piggyback handling
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("cannot start test server: %v", err)
+	}
+	defer listener.Close()
+
+	serverAddr := listener.Addr().(*net.TCPAddr)
+	var serverReceived []byte
+	var srvMu sync.Mutex
+	go func() {
+		c, err := listener.Accept()
+		if err == nil {
+			buf := make([]byte, 1024)
+			for {
+				n, err := c.Read(buf)
+				if err != nil {
+					break
+				}
+				srvMu.Lock()
+				serverReceived = append(serverReceived, buf[:n]...)
+				srvMu.Unlock()
+			}
+			c.Close()
+		}
+	}()
+
+	srcIP := [4]byte{127, 0, 0, 1}
+	dstIP := [4]byte{127, 0, 0, 1}
+	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
+
+	var receivedFrames [][]byte
+	var mu sync.Mutex
+	writer := func(b []byte) error {
+		mu.Lock()
+		frame := make([]byte, len(b))
+		copy(frame, b)
+		receivedFrames = append(receivedFrames, frame)
+		mu.Unlock()
+		return nil
+	}
+
+	conn := newTCPConn(srcIP, 54326, dstIP, uint16(serverAddr.Port), clientMAC, gwMAC, writer)
+
+	// SYN
+	synPacket := createTCPPacket(srcIP, dstIP, 54326, uint16(serverAddr.Port), 5000, 0, 0x02, nil)
+	_ = conn.handleOutbound(synPacket)
+	time.Sleep(50 * time.Millisecond)
+
+	conn.mu.Lock()
+	sSeq := conn.sSeq
+	conn.mu.Unlock()
+
+	// Complete handshake
+	ackPacket := createTCPPacket(srcIP, dstIP, 54326, uint16(serverAddr.Port), 5001, sSeq+1, 0x10, nil)
+	_ = conn.handleOutbound(ackPacket)
+	time.Sleep(50 * time.Millisecond)
+
+	// Send data with piggy-backed FIN (PSH+ACK+FIN = 0x19)
+	payload := []byte("last data")
+	conn.mu.Lock()
+	sSeqNow := conn.sSeq
+	conn.mu.Unlock()
+
+	dataFinPacket := createTCPPacket(srcIP, dstIP, 54326, uint16(serverAddr.Port), 5001, sSeqNow, 0x19, payload)
+	err = conn.handleOutbound(dataFinPacket)
+	if err != nil {
+		t.Fatalf("data+FIN handleOutbound failed: %v", err)
+	}
+
+	conn.mu.Lock()
+	closed := conn.closed
+	cSeq := conn.cSeq
+	conn.mu.Unlock()
+
+	// Half-close: connection stays open for server responses
+	if closed {
+		t.Error("connection should NOT be fully closed after data+FIN (half-close)")
+	}
+	// cSeq should advance by payload + 1 for FIN
+	expectedCSeq := uint32(5001 + len(payload) + 1)
+	if cSeq != expectedCSeq {
+		t.Errorf("cSeq should be %d after data+FIN, got %d", expectedCSeq, cSeq)
+	}
+
+	// Verify data was forwarded to remote
+	time.Sleep(100 * time.Millisecond)
+	srvMu.Lock()
+	got := string(serverReceived)
+	srvMu.Unlock()
+	if got != "last data" {
+		t.Errorf("server should have received %q, got %q", "last data", got)
+	}
+}
+
+func TestTCPConnPureACKAdvancesSendQ(t *testing.T) {
+	srcIP := [4]byte{192, 168, 1, 1}
+	dstIP := [4]byte{8, 8, 8, 8}
+	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
+	writer := func(b []byte) error { return nil }
+
+	conn := newTCPConn(srcIP, 12345, dstIP, 80, clientMAC, gwMAC, writer)
+	// Simulate a connected, established state
+	conn.established = true
+	conn.sSeq = 5000
+	conn.sAck = 5000
+	conn.cSeq = 3000
+	conn.sUnacked = 100
+	conn.recvWnd = 65535
+	sendQData := []byte("more data to send")
+	conn.sendQ = append([]byte{}, sendQData...)
+	sendQLen := len(sendQData)
+
+	// Send a pure ACK that advances sAck
+	ackPacket := createTCPPacket(srcIP, dstIP, 12345, 80, 3000, 5050, 0x10, nil)
+	err := conn.handleOutbound(ackPacket)
+	if err != nil {
+		t.Fatalf("pure ACK handleOutbound failed: %v", err)
+	}
+
+	conn.mu.Lock()
+	sAck := conn.sAck
+	sUnacked := conn.sUnacked
+	remainingQ := len(conn.sendQ)
+	conn.mu.Unlock()
+
+	if sAck != 5050 {
+		t.Errorf("sAck should be 5050, got %d", sAck)
+	}
+	// After advancing by 50 (from 100 to 50), flushSendQ sends the queued data,
+	// which adds sendQLen to sUnacked. So: 50 + sendQLen
+	expectedUnacked := uint32(50 + sendQLen)
+	if sUnacked != expectedUnacked {
+		t.Errorf("sUnacked should be %d (50 remaining + %d flushed), got %d", expectedUnacked, sendQLen, sUnacked)
+	}
+	// sendQ should have been flushed
+	if remainingQ != 0 {
+		t.Errorf("sendQ should be empty after flush, has %d bytes", remainingQ)
+	}
+}
+
+func TestTCPConnReadFromRemote(t *testing.T) {
+	// Start an echo server that sends data back
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("cannot start test server: %v", err)
+	}
+	defer listener.Close()
+
+	serverAddr := listener.Addr().(*net.TCPAddr)
+	responseData := "response from server"
+	go func() {
+		c, err := listener.Accept()
+		if err == nil {
+			// Read what client sends, then respond
+			buf := make([]byte, 1024)
+			n, _ := c.Read(buf)
+			if n > 0 {
+				c.Write([]byte(responseData))
+			}
+			time.Sleep(50 * time.Millisecond)
+			c.Close()
+		}
+	}()
+
+	srcIP := [4]byte{127, 0, 0, 1}
+	dstIP := [4]byte{127, 0, 0, 1}
+	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
+
+	var receivedFrames [][]byte
+	var mu sync.Mutex
+	writer := func(b []byte) error {
+		mu.Lock()
+		frame := make([]byte, len(b))
+		copy(frame, b)
+		receivedFrames = append(receivedFrames, frame)
+		mu.Unlock()
+		return nil
+	}
+
+	conn := newTCPConn(srcIP, 54327, dstIP, uint16(serverAddr.Port), clientMAC, gwMAC, writer)
+
+	// SYN
+	synPacket := createTCPPacket(srcIP, dstIP, 54327, uint16(serverAddr.Port), 6000, 0, 0x02, nil)
+	_ = conn.handleOutbound(synPacket)
+	time.Sleep(50 * time.Millisecond)
+
+	conn.mu.Lock()
+	sSeq := conn.sSeq
+	conn.mu.Unlock()
+
+	// Complete handshake
+	ackPacket := createTCPPacket(srcIP, dstIP, 54327, uint16(serverAddr.Port), 6001, sSeq+1, 0x10, nil)
+	_ = conn.handleOutbound(ackPacket)
+	time.Sleep(50 * time.Millisecond)
+
+	// Send data to trigger server response
+	payload := []byte("ping")
+	conn.mu.Lock()
+	sSeqNow := conn.sSeq
+	conn.mu.Unlock()
+
+	dataPacket := createTCPPacket(srcIP, dstIP, 54327, uint16(serverAddr.Port), 6001, sSeqNow, 0x18, payload)
+	_ = conn.handleOutbound(dataPacket)
+
+	// Wait for readFromRemote to receive the echo and send data frames
+	time.Sleep(300 * time.Millisecond)
+
+	mu.Lock()
+	frameCount := len(receivedFrames)
+	// Look for data frames (PSH+ACK = 0x18)
+	dataFrameFound := false
+	for _, frame := range receivedFrames {
+		if len(frame) >= 14+20+20 {
+			tcpHdr := frame[14+20:]
+			flags := tcpHdr[13]
+			doff := int((tcpHdr[12]>>4)&0x0F) * 4
+			if flags == 0x18 && len(tcpHdr) > doff {
+				dataPayload := tcpHdr[doff:]
+				if len(dataPayload) > 0 {
+					dataFrameFound = true
+				}
+			}
+		}
+	}
+	mu.Unlock()
+
+	if frameCount < 3 {
+		t.Errorf("expected at least 3 frames (SYN-ACK + ACK + data), got %d", frameCount)
+	}
+	if !dataFrameFound {
+		t.Error("expected data frame from readFromRemote with server response")
+	}
+}
+
+func TestTCPConnMaintenanceWindowProbe(t *testing.T) {
+	srcIP := [4]byte{192, 168, 1, 1}
+	dstIP := [4]byte{8, 8, 8, 8}
+	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
+
+	var sentFrames [][]byte
+	var mu sync.Mutex
+	writer := func(b []byte) error {
+		mu.Lock()
+		frame := make([]byte, len(b))
+		copy(frame, b)
+		sentFrames = append(sentFrames, frame)
+		mu.Unlock()
+		return nil
+	}
+
+	conn := newTCPConn(srcIP, 12345, dstIP, 80, clientMAC, gwMAC, writer)
+	conn.established = true
+	conn.sSeq = 5000
+	conn.cSeq = 3000
+	conn.lastAct = time.Now() // recent, so no keepalive
+	conn.sendQ = []byte("pending data")
+	conn.sUnacked = 100
+	conn.recvWnd = 100 // window full (recvWnd - sUnacked = 0)
+
+	// Simulate maintenance tick - window probe condition
+	conn.mu.Lock()
+	if (len(conn.sendQ) > 0 || conn.sUnacked > 0) && (int(conn.recvWnd)-int(conn.sUnacked) <= 0) {
+		pkt := BuildTCPPacket(conn.gwMAC, conn.clientMAC, conn.rIP, conn.cSrcIP, conn.rPort, conn.cSrcPort, conn.sSeq-1, conn.cSeq, 0x10, nil)
+		_ = conn.w(pkt)
+	}
+	conn.mu.Unlock()
+
+	mu.Lock()
+	frameCount := len(sentFrames)
+	mu.Unlock()
+
+	if frameCount != 1 {
+		t.Fatalf("expected 1 window probe, got %d", frameCount)
+	}
+
+	// Verify it has seq-1
+	frame := sentFrames[0]
+	tcpStart := 14 + 20
+	seq := binary.BigEndian.Uint32(frame[tcpStart+4 : tcpStart+8])
+	if seq != 4999 {
+		t.Errorf("window probe should have seq=4999, got %d", seq)
+	}
+}
+
 func createTCPPacketWithMSS(srcIP, dstIP [4]byte, srcPort, dstPort uint16, seq, ack uint32, flags uint8, payload []byte, mss uint16) []byte {
 	ihl := 20
 	// TCP header with MSS option: 20 base + 4 for MSS option

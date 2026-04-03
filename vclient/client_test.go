@@ -1,7 +1,6 @@
 package vclient_test
 
 import (
-	"io"
 	"net"
 	"testing"
 	"time"
@@ -97,7 +96,7 @@ func TestPipeTCPLargeTransfer(t *testing.T) {
 	}
 	defer ln.Close()
 
-	// Server that echoes everything and then closes
+	// Server that echoes everything back in chunks
 	serverDone := make(chan error, 1)
 	go func() {
 		conn, err := ln.Accept()
@@ -106,8 +105,18 @@ func TestPipeTCPLargeTransfer(t *testing.T) {
 			return
 		}
 		defer conn.Close()
-		_, err = io.Copy(conn, conn)
-		serverDone <- err
+		buf := make([]byte, 4096)
+		for {
+			n, err := conn.Read(buf)
+			if err != nil {
+				serverDone <- err
+				return
+			}
+			if _, err := conn.Write(buf[:n]); err != nil {
+				serverDone <- err
+				return
+			}
+		}
 	}()
 
 	client := vclient.Pipe(stack, 0, clientMAC, gwMAC)
@@ -138,10 +147,11 @@ func TestPipeTCPLargeTransfer(t *testing.T) {
 	}
 
 	// Read it all back
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	// Use a generous per-read deadline to handle race detector overhead.
 	received := make([]byte, 0, len(data))
 	buf := make([]byte, 4096)
 	for len(received) < len(data) {
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 		n, err := conn.Read(buf)
 		if err != nil {
 			t.Fatalf("Read failed after %d bytes: %v", len(received), err)

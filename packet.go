@@ -2,8 +2,8 @@ package slirp
 
 import "encoding/binary"
 
-// buildFrame4 wraps a raw TCP segment in an IPv4 + Ethernet frame.
-func buildFrame4(srcMAC, dstMAC [6]byte, srcIP, dstIP [4]byte, tcpSeg []byte) []byte {
+// buildPacket4 wraps a raw TCP segment in an IPv4 packet (no Ethernet header).
+func buildPacket4(srcIP, dstIP [4]byte, tcpSeg []byte) []byte {
 	ihl := 20
 	totalLen := ihl + len(tcpSeg)
 
@@ -33,17 +33,14 @@ func buildFrame4(srcMAC, dstMAC [6]byte, srcIP, dstIP [4]byte, tcpSeg []byte) []
 		}
 	}
 
-	frame := make([]byte, 14+ihl+len(tcpCopy))
-	copy(frame[0:6], dstMAC[:])
-	copy(frame[6:12], srcMAC[:])
-	binary.BigEndian.PutUint16(frame[12:14], 0x0800)
-	copy(frame[14:], ip)
-	copy(frame[14+ihl:], tcpCopy)
-	return frame
+	pkt := make([]byte, ihl+len(tcpCopy))
+	copy(pkt, ip)
+	copy(pkt[ihl:], tcpCopy)
+	return pkt
 }
 
-// buildFrame6 wraps a raw TCP segment in an IPv6 + Ethernet frame.
-func buildFrame6(srcMAC, dstMAC [6]byte, srcIP, dstIP [16]byte, tcpSeg []byte) []byte {
+// buildPacket6 wraps a raw TCP segment in an IPv6 packet (no Ethernet header).
+func buildPacket6(srcIP, dstIP [16]byte, tcpSeg []byte) []byte {
 	ip := make([]byte, 40)
 	ip[0] = 0x60 // Version 6
 	binary.BigEndian.PutUint16(ip[4:6], uint16(len(tcpSeg)))
@@ -61,11 +58,8 @@ func buildFrame6(srcMAC, dstMAC [6]byte, srcIP, dstIP [16]byte, tcpSeg []byte) [
 		binary.BigEndian.PutUint16(tcpCopy[16:18], cs)
 	}
 
-	frame := make([]byte, 14+40+len(tcpCopy))
-	copy(frame[0:6], dstMAC[:])
-	copy(frame[6:12], srcMAC[:])
-	binary.BigEndian.PutUint16(frame[12:14], 0x86DD)
-	copy(frame[14:], ip)
-	copy(frame[14+40:], tcpCopy)
-	return frame
+	pkt := make([]byte, 40+len(tcpCopy))
+	copy(pkt, ip)
+	copy(pkt[40:], tcpCopy)
+	return pkt
 }

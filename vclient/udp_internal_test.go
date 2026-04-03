@@ -7,14 +7,13 @@ import (
 )
 
 func TestUDPConnReadWrite(t *testing.T) {
-	c := New([6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, func([]byte) error { return nil })
+	c := New(func([]byte) error { return nil })
 	defer c.Close()
 
 	localIP := [4]byte{10, 0, 0, 2}
 	remoteIP := [4]byte{10, 0, 0, 1}
-	gwMAC := [6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x02}
 
-	conn := newUDPConn(c, localIP, 50000, remoteIP, 12345, gwMAC)
+	conn := newUDPConn(c, localIP, 50000, remoteIP, 12345)
 
 	// Enqueue a datagram via handleInbound
 	conn.handleInbound([]byte("hello udp"))
@@ -31,10 +30,10 @@ func TestUDPConnReadWrite(t *testing.T) {
 }
 
 func TestUDPConnReadMultiple(t *testing.T) {
-	c := New([6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, func([]byte) error { return nil })
+	c := New(func([]byte) error { return nil })
 	defer c.Close()
 
-	conn := newUDPConn(c, [4]byte{10, 0, 0, 2}, 50000, [4]byte{10, 0, 0, 1}, 12345, [6]byte{})
+	conn := newUDPConn(c, [4]byte{10, 0, 0, 2}, 50000, [4]byte{10, 0, 0, 1}, 12345)
 
 	conn.handleInbound([]byte("first"))
 	conn.handleInbound([]byte("second"))
@@ -58,10 +57,10 @@ func TestUDPConnReadMultiple(t *testing.T) {
 }
 
 func TestUDPConnReadClosed(t *testing.T) {
-	c := New([6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, func([]byte) error { return nil })
+	c := New(func([]byte) error { return nil })
 	defer c.Close()
 
-	conn := newUDPConn(c, [4]byte{10, 0, 0, 2}, 50000, [4]byte{10, 0, 0, 1}, 12345, [6]byte{})
+	conn := newUDPConn(c, [4]byte{10, 0, 0, 2}, 50000, [4]byte{10, 0, 0, 1}, 12345)
 	k := connKey{localPort: 50000, remoteIP: [4]byte{10, 0, 0, 1}, remotePort: 12345}
 	c.udpMu.Lock()
 	c.udpConns[k] = conn
@@ -77,10 +76,10 @@ func TestUDPConnReadClosed(t *testing.T) {
 }
 
 func TestUDPConnWriteClosed(t *testing.T) {
-	c := New([6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, func([]byte) error { return nil })
+	c := New(func([]byte) error { return nil })
 	defer c.Close()
 
-	conn := newUDPConn(c, [4]byte{10, 0, 0, 2}, 50000, [4]byte{10, 0, 0, 1}, 12345, [6]byte{})
+	conn := newUDPConn(c, [4]byte{10, 0, 0, 2}, 50000, [4]byte{10, 0, 0, 1}, 12345)
 	k := connKey{localPort: 50000, remoteIP: [4]byte{10, 0, 0, 1}, remotePort: 12345}
 	c.udpMu.Lock()
 	c.udpConns[k] = conn
@@ -95,10 +94,10 @@ func TestUDPConnWriteClosed(t *testing.T) {
 }
 
 func TestUDPConnAddresses(t *testing.T) {
-	c := New([6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, func([]byte) error { return nil })
+	c := New(func([]byte) error { return nil })
 	defer c.Close()
 
-	conn := newUDPConn(c, [4]byte{10, 0, 0, 2}, 50000, [4]byte{10, 0, 0, 1}, 12345, [6]byte{})
+	conn := newUDPConn(c, [4]byte{10, 0, 0, 2}, 50000, [4]byte{10, 0, 0, 1}, 12345)
 
 	local := conn.LocalAddr().(*net.UDPAddr)
 	if local.Port != 50000 {
@@ -118,10 +117,10 @@ func TestUDPConnAddresses(t *testing.T) {
 }
 
 func TestUDPConnHandleInboundCopiesData(t *testing.T) {
-	c := New([6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, func([]byte) error { return nil })
+	c := New(func([]byte) error { return nil })
 	defer c.Close()
 
-	conn := newUDPConn(c, [4]byte{10, 0, 0, 2}, 50000, [4]byte{10, 0, 0, 1}, 12345, [6]byte{})
+	conn := newUDPConn(c, [4]byte{10, 0, 0, 2}, 50000, [4]byte{10, 0, 0, 1}, 12345)
 
 	// handleInbound should copy the data, not retain the slice
 	original := []byte("original")
@@ -162,13 +161,13 @@ func buildIPUDP(srcIP, dstIP [4]byte, srcPort, dstPort uint16, payload []byte) [
 }
 
 func TestHandleUDPDispatch(t *testing.T) {
-	c := New([6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, func([]byte) error { return nil })
+	c := New(func([]byte) error { return nil })
 	defer c.Close()
 
 	localIP := [4]byte{10, 0, 0, 2}
 	remoteIP := [4]byte{10, 0, 0, 1}
 
-	conn := newUDPConn(c, localIP, 50000, remoteIP, 12345, [6]byte{})
+	conn := newUDPConn(c, localIP, 50000, remoteIP, 12345)
 	k := connKey{localPort: 50000, remoteIP: remoteIP, remotePort: 12345}
 	c.udpMu.Lock()
 	c.udpConns[k] = conn
@@ -192,30 +191,8 @@ func TestHandleUDPDispatch(t *testing.T) {
 	}
 }
 
-func TestHandleUDPDHCPPath(t *testing.T) {
-	c := New([6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, func([]byte) error { return nil })
-	defer c.Close()
-
-	// Build packet from port 67 to port 68 (DHCP)
-	pkt := buildIPUDP([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 67, 68, []byte("dhcp-data"))
-	err := c.handleUDP(pkt, 20)
-	if err != nil {
-		t.Fatalf("handleUDP: %v", err)
-	}
-
-	// Should be delivered to dhcpCh
-	select {
-	case data := <-c.dhcpCh:
-		if string(data) != "dhcp-data" {
-			t.Errorf("DHCP data = %q, want %q", string(data), "dhcp-data")
-		}
-	default:
-		t.Error("expected data on dhcpCh")
-	}
-}
-
 func TestHandleUDPNoConnection(t *testing.T) {
-	c := New([6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, func([]byte) error { return nil })
+	c := New(func([]byte) error { return nil })
 	defer c.Close()
 
 	// Build packet for a port with no registered connection
@@ -227,7 +204,7 @@ func TestHandleUDPNoConnection(t *testing.T) {
 }
 
 func TestHandleUDPTooShort(t *testing.T) {
-	c := New([6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, func([]byte) error { return nil })
+	c := New(func([]byte) error { return nil })
 	defer c.Close()
 
 	// UDP header needs at least 8 bytes after IP header
@@ -241,10 +218,10 @@ func TestHandleUDPTooShort(t *testing.T) {
 }
 
 func TestUDPConnDoubleClose(t *testing.T) {
-	c := New([6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, func([]byte) error { return nil })
+	c := New(func([]byte) error { return nil })
 	defer c.Close()
 
-	conn := newUDPConn(c, [4]byte{10, 0, 0, 2}, 50000, [4]byte{10, 0, 0, 1}, 12345, [6]byte{})
+	conn := newUDPConn(c, [4]byte{10, 0, 0, 2}, 50000, [4]byte{10, 0, 0, 1}, 12345)
 	k := connKey{localPort: 50000, remoteIP: [4]byte{10, 0, 0, 1}, remotePort: 12345}
 	c.udpMu.Lock()
 	c.udpConns[k] = conn

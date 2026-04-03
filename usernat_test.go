@@ -106,8 +106,6 @@ func TestRandUint32(t *testing.T) {
 
 func TestHandlePacket_InvalidPackets(t *testing.T) {
 	s := New()
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
 	writer := func(b []byte) error { return nil }
 
 	tests := []struct {
@@ -140,7 +138,7 @@ func TestHandlePacket_InvalidPackets(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := s.HandlePacket(0, clientMAC, gwMAC, tt.packet, writer)
+			err := s.HandlePacket(0, tt.packet, writer)
 			if err == nil {
 				t.Error("expected error, got nil")
 			} else if err.Error() != tt.errMsg {
@@ -152,8 +150,6 @@ func TestHandlePacket_InvalidPackets(t *testing.T) {
 
 func TestHandlePacket_UnknownProtocol(t *testing.T) {
 	s := New()
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
 	writer := func(b []byte) error { return nil }
 
 	// Create a minimal valid IPv4 packet with protocol 1 (ICMP)
@@ -164,7 +160,7 @@ func TestHandlePacket_UnknownProtocol(t *testing.T) {
 	copy(packet[12:16], []byte{192, 168, 1, 1}) // Source IP
 	copy(packet[16:20], []byte{8, 8, 8, 8})     // Dest IP
 
-	err := s.HandlePacket(0, clientMAC, gwMAC, packet, writer)
+	err := s.HandlePacket(0, packet, writer)
 	if err != nil {
 		t.Errorf("unexpected error for unsupported protocol: %v", err)
 	}
@@ -227,13 +223,6 @@ func TestSeqAfter(t *testing.T) {
 
 func TestStackClose(t *testing.T) {
 	s := New()
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
-	writer := func(b []byte) error { return nil }
-
-	_ = clientMAC
-	_ = gwMAC
-	_ = writer
 
 	// Add a TCP connection
 	tcpK := key{srcIP: [4]byte{192, 168, 1, 1}, srcPort: 12345, dstIP: [4]byte{8, 8, 8, 8}, dstPort: 80}
@@ -346,8 +335,6 @@ func TestStackCloseStopsMaintenanceGoroutine(t *testing.T) {
 
 func TestHandlePacket_IPv6Routing(t *testing.T) {
 	s := New()
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
 	writer := func(b []byte) error { return nil }
 
 	// Create a valid IPv6 TCP SYN to a real port to exercise the outbound path
@@ -381,7 +368,7 @@ func TestHandlePacket_IPv6Routing(t *testing.T) {
 	packet[52] = 0x50                               // data offset
 	packet[53] = 0x02                               // SYN
 
-	err = s.HandlePacket(0, clientMAC, gwMAC, packet, writer)
+	err = s.HandlePacket(0, packet, writer)
 	if err != nil {
 		t.Errorf("HandlePacket with IPv6 TCP SYN failed: %v", err)
 	}
@@ -512,8 +499,6 @@ func TestMaintenanceCleanup_DirectSimulation(t *testing.T) {
 
 func TestConcurrentAccess(t *testing.T) {
 	s := New()
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
 	writer := func(b []byte) error { return nil }
 
 	// Start a test server
@@ -556,7 +541,7 @@ func TestConcurrentAccess(t *testing.T) {
 			packet[32] = 0x50                                                  // Data offset
 			packet[33] = 0x02                                                  // SYN flag
 
-			_ = s.HandlePacket(0, clientMAC, gwMAC, packet, writer)
+			_ = s.HandlePacket(0, packet, writer)
 		}(uint16(10000 + i))
 	}
 	wg.Wait()

@@ -1,13 +1,12 @@
 // Package vclient implements a virtual network client with a user-space TCP/IP
-// stack. It operates at the Ethernet frame level and can be connected to a slirp
-// Stack for testing, or used on any Ethernet-based network.
+// stack. It operates at the IP packet level and can be connected to a slirp
+// Stack for testing, or used on any IP-based network.
 //
-// The client supports DHCP, DNS, TCP (with retransmission), and UDP, and exposes
+// The client supports DNS, TCP (with retransmission), and UDP, and exposes
 // standard Go interfaces such as Dial, net.Conn, and net.Resolver.
 package vclient
 
 import (
-	"encoding/binary"
 	"errors"
 	"net"
 	"sync"
@@ -23,21 +22,15 @@ type connKey struct {
 	remotePort uint16
 }
 
-// Client is a virtual network client operating at the Ethernet frame level.
+// Client is a virtual network client operating at the IP packet level.
 type Client struct {
 	mu   sync.RWMutex
-	mac  [6]byte
 	ip   [4]byte
 	mask [4]byte
 	gw   [4]byte
 	dns  [][4]byte
 
-	w slirp.Writer // how to send Ethernet frames out
-
-	// ARP
-	arpMu    sync.Mutex
-	arpTable map[[4]byte][6]byte
-	arpWait  map[[4]byte][]chan [6]byte
+	w slirp.Writer // how to send IP packets out
 
 	// TCP connections
 	tcpMu    sync.Mutex
@@ -55,32 +48,24 @@ type Client struct {
 	portMu   sync.Mutex
 	nextPort uint16
 
-	// DHCP response channel
-	dhcpCh chan []byte
-
 	done   chan struct{}
 	closed atomic.Bool
 }
 
-// New creates a new virtual network client with the given MAC address and
-// frame writer. The writer is called whenever the client needs to send an
-// Ethernet frame.
-func New(mac [6]byte, w slirp.Writer) *Client {
+// New creates a new virtual network client with the given packet writer.
+// The writer is called whenever the client needs to send an IP packet.
+func New(w slirp.Writer) *Client {
 	return &Client{
-		mac:       mac,
 		w:         w,
-		arpTable:  make(map[[4]byte][6]byte),
-		arpWait:   make(map[[4]byte][]chan [6]byte),
 		tcpConns:  make(map[connKey]*TCPConn),
 		listeners: make(map[uint16]*Listener),
 		udpConns:  make(map[connKey]*UDPConn),
 		nextPort:  49152,
-		dhcpCh:    make(chan []byte, 4),
 		done:      make(chan struct{}),
 	}
 }
 
-// SetWriter sets or replaces the frame writer.
+// SetWriter sets or replaces the packet writer.
 func (c *Client) SetWriter(w slirp.Writer) {
 	c.mu.Lock()
 	c.w = w
@@ -115,23 +100,16 @@ func (c *Client) IP() net.IP {
 	return net.IP(c.ip[:]).To4()
 }
 
-// MAC returns the client's MAC address.
-func (c *Client) MAC() [6]byte {
-	return c.mac
-}
-
-// HandleFrame processes an incoming Ethernet frame. This is the entry point
-// for frames received from the network (or from a slirp Stack's Writer).
-func (c *Client) HandleFrame(frame []byte) error {
-	if len(frame) < 14 {
+// HandlePacket processes an incoming IP packet. This is the entry point
+// for packets received from the network (or from a slirp Stack's Writer).
+func (c *Client) HandlePacket(packet []byte) error {
+	if len(packet) < 20 {
 		return nil
 	}
-	etherType := binary.BigEndian.Uint16(frame[12:14])
-	switch etherType {
-	case 0x0806: // ARP
-		return c.handleARP(frame)
-	case 0x0800: // IPv4
-		return c.handleIPv4(frame[14:])
+	version := packet[0] >> 4
+	switch version {
+	case 4:
+		return c.handleIPv4(packet)
 	}
 	return nil
 }
@@ -214,36 +192,15 @@ func (c *Client) allocPort() uint16 {
 	return p
 }
 
-// getGatewayMAC returns the MAC address to use for sending.
-// Checks the gateway first, then the Pipe sentinel (0.0.0.0).
-func (c *Client) getGatewayMAC() [6]byte {
-	c.arpMu.Lock()
-	defer c.arpMu.Unlock()
-	if mac, ok := c.arpTable[c.gw]; ok {
-		return mac
-	}
-	// Pipe sentinel: 0.0.0.0 maps to gwMAC for all destinations
-	if mac, ok := c.arpTable[[4]byte{0, 0, 0, 0}]; ok {
-		return mac
-	}
-	return [6]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-}
-
-// sendIPv4 wraps an IP packet in an Ethernet frame and sends it via the writer.
-func (c *Client) sendIPv4(dstMAC [6]byte, ipPacket []byte) error {
-	frame := make([]byte, 14+len(ipPacket))
-	copy(frame[0:6], dstMAC[:])
-	copy(frame[6:12], c.mac[:])
-	binary.BigEndian.PutUint16(frame[12:14], 0x0800)
-	copy(frame[14:], ipPacket)
-
+// sendPacket sends a raw IP packet via the writer.
+func (c *Client) sendPacket(ipPacket []byte) error {
 	c.mu.RLock()
 	w := c.w
 	c.mu.RUnlock()
 	if w == nil {
 		return errors.New("no writer configured")
 	}
-	return w(frame)
+	return w(ipPacket)
 }
 
 // Close shuts down the client and all active connections.

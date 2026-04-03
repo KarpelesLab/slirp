@@ -48,11 +48,9 @@ func TestNewUDPConn6(t *testing.T) {
 	var srcIP, dstIP [16]byte
 	srcIP[15] = 1 // ::1
 	dstIP[15] = 1 // ::1
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
 	writer := func(b []byte) error { return nil }
 
-	conn, err := newUDPConn6(srcIP, 12345, dstIP, 9999, clientMAC, gwMAC, writer)
+	conn, err := newUDPConn6(srcIP, 12345, dstIP, 9999, writer)
 	if err != nil {
 		t.Skipf("cannot create UDP6 connection: %v", err)
 	}
@@ -107,8 +105,6 @@ func TestUDPConn6HandleOutbound(t *testing.T) {
 	var srcIP, dstIP [16]byte
 	srcIP[15] = 1 // ::1
 	dstIP[15] = 1 // ::1
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
 
 	var receivedFrames [][]byte
 	var mu sync.Mutex
@@ -121,7 +117,7 @@ func TestUDPConn6HandleOutbound(t *testing.T) {
 		return nil
 	}
 
-	conn, err := newUDPConn6(srcIP, 54321, dstIP, uint16(actualServerAddr.Port), clientMAC, gwMAC, writer)
+	conn, err := newUDPConn6(srcIP, 54321, dstIP, uint16(actualServerAddr.Port), writer)
 	if err != nil {
 		t.Fatalf("newUDPConn6 failed: %v", err)
 	}
@@ -147,24 +143,18 @@ func TestUDPConn6HandleOutbound(t *testing.T) {
 		t.Error("expected at least one response frame from echo server")
 	}
 
-	// Verify the response frame is a valid IPv6 UDP frame
+	// Verify the response frame is a valid IPv6 UDP packet
 	if frameCount >= 1 {
 		mu.Lock()
 		frame := receivedFrames[0]
 		mu.Unlock()
 
-		if len(frame) < 14+40+8 {
+		if len(frame) < 40+8 {
 			t.Fatal("response frame too short")
 		}
 
-		// Check EtherType
-		etherType := binary.BigEndian.Uint16(frame[12:14])
-		if etherType != 0x86DD {
-			t.Errorf("expected IPv6 EtherType 0x86DD, got 0x%04x", etherType)
-		}
-
 		// Check IPv6 header
-		ipv6 := frame[14:]
+		ipv6 := frame
 		if ipv6[0]>>4 != 6 {
 			t.Errorf("expected IPv6 version 6, got %d", ipv6[0]>>4)
 		}
@@ -189,11 +179,9 @@ func TestUDPConn6HandleOutboundShortPacket(t *testing.T) {
 	var srcIP, dstIP [16]byte
 	srcIP[15] = 1
 	dstIP[15] = 1
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
 	writer := func(b []byte) error { return nil }
 
-	conn, err := newUDPConn6(srcIP, 54321, dstIP, 9999, clientMAC, gwMAC, writer)
+	conn, err := newUDPConn6(srcIP, 54321, dstIP, 9999, writer)
 	if err != nil {
 		t.Skipf("cannot create UDP6 connection: %v", err)
 	}
@@ -242,9 +230,6 @@ func TestHandlePacket_IPv6UDP(t *testing.T) {
 	var srcIP, dstIP [16]byte
 	srcIP[15] = 1 // ::1
 	dstIP[15] = 1 // ::1
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
-
 	var receivedFrames [][]byte
 	var mu sync.Mutex
 	writer := func(b []byte) error {
@@ -259,7 +244,7 @@ func TestHandlePacket_IPv6UDP(t *testing.T) {
 	payload := []byte("UDP6 test!")
 	udpPacket := createUDPPacket6(srcIP, dstIP, 54321, uint16(actualServerAddr.Port), payload)
 
-	err = s.HandlePacket(0, clientMAC, gwMAC, udpPacket, writer)
+	err = s.HandlePacket(0, udpPacket, writer)
 	if err != nil {
 		t.Fatalf("HandlePacket failed: %v", err)
 	}
@@ -303,9 +288,6 @@ func TestUDPConn6ReadLoop(t *testing.T) {
 	var srcIP, dstIP [16]byte
 	srcIP[15] = 1
 	dstIP[15] = 1
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
-
 	var receivedFrames [][]byte
 	var mu sync.Mutex
 	writer := func(b []byte) error {
@@ -317,7 +299,7 @@ func TestUDPConn6ReadLoop(t *testing.T) {
 		return nil
 	}
 
-	conn, err := newUDPConn6(srcIP, 54321, dstIP, uint16(actualServerAddr.Port), clientMAC, gwMAC, writer)
+	conn, err := newUDPConn6(srcIP, 54321, dstIP, uint16(actualServerAddr.Port), writer)
 	if err != nil {
 		t.Fatalf("newUDPConn6 failed: %v", err)
 	}

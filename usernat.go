@@ -11,7 +11,7 @@ import (
 	"github.com/KarpelesLab/slirp/vtcp"
 )
 
-// Writer is the callback used to emit full Ethernet frames back to the client.
+// Writer is the callback used to emit raw IP packets back to the client.
 type Writer func([]byte) error
 
 type key struct {
@@ -121,11 +121,9 @@ func (s *Stack) Close() error {
 //
 // Parameters:
 //   - namespace: Identifier for connection isolation (use 0 for single namespace)
-//   - clientMAC: MAC address of the endpoint that sent this packet (used as destination in responses)
-//   - gwMAC: MAC address for this slirp instance (used as source in responses)
-//   - packet: Raw IP packet data (must start at IP header, not Ethernet header)
-//   - w: Writer callback for sending Ethernet frames back to the endpoint
-func (s *Stack) HandlePacket(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, packet []byte, w Writer) error {
+//   - packet: Raw IP packet data (must start at IP header)
+//   - w: Writer callback for sending raw IP packets back to the endpoint
+func (s *Stack) HandlePacket(namespace uintptr, packet []byte, w Writer) error {
 	if len(packet) < 20 {
 		return errors.New("packet too short")
 	}
@@ -134,15 +132,15 @@ func (s *Stack) HandlePacket(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte
 	version := packet[0] >> 4
 	switch version {
 	case 4:
-		return s.handleIPv4(namespace, clientMAC, gwMAC, packet, w)
+		return s.handleIPv4(namespace, packet, w)
 	case 6:
-		return s.handleIPv6(namespace, clientMAC, gwMAC, packet, w)
+		return s.handleIPv6(namespace, packet, w)
 	default:
 		return errors.New("unsupported IP version")
 	}
 }
 
-func (s *Stack) handleIPv4(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, ip []byte, w Writer) error {
+func (s *Stack) handleIPv4(namespace uintptr, ip []byte, w Writer) error {
 	if len(ip) < 20 {
 		return errors.New("IPv4 packet too short")
 	}
@@ -191,7 +189,7 @@ func (s *Stack) handleIPv4(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, 
 					LocalAddr:  localAddr,
 					RemoteAddr: remoteAddr,
 					Writer: func(tcpSeg []byte) error {
-						return w(buildFrame4(gwMAC, clientMAC, dstIP, srcIP, tcpSeg))
+						return w(buildPacket4(dstIP, srcIP, tcpSeg))
 					},
 					MSS:       1460,
 					Keepalive: true,
@@ -279,7 +277,7 @@ func (s *Stack) handleIPv4(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, 
 				}
 				rstSeg = &vtcp.Segment{SrcPort: dstPort, DstPort: srcPort, Seq: 0, Ack: segSEQ + dataLen, Flags: vtcp.FlagRST | vtcp.FlagACK}
 			}
-			pkt := buildFrame4(gwMAC, clientMAC, dstIP, srcIP, rstSeg.Marshal())
+			pkt := buildPacket4(dstIP, srcIP, rstSeg.Marshal())
 			_ = w(pkt)
 			return nil
 		}
@@ -307,7 +305,7 @@ func (s *Stack) handleIPv4(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, 
 		if err != nil {
 			s.mu.Unlock()
 			// Send RST to client
-			rst := buildFrame4(gwMAC, clientMAC, dstIP, srcIP,
+			rst := buildPacket4(dstIP, srcIP,
 				(&vtcp.Segment{SrcPort: dstPort, DstPort: srcPort, Ack: seg.Seq + 1, Flags: vtcp.FlagRST | vtcp.FlagACK}).Marshal())
 			_ = w(rst)
 			return nil
@@ -327,7 +325,7 @@ func (s *Stack) handleIPv4(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, 
 			LocalAddr:  localAddr,
 			RemoteAddr: remoteClientAddr,
 			Writer: func(tcpSeg []byte) error {
-				return w(buildFrame4(gwMAC, clientMAC, dstIP, srcIP, tcpSeg))
+				return w(buildPacket4(dstIP, srcIP, tcpSeg))
 			},
 			MSS:       1460,
 			Keepalive: true,
@@ -358,7 +356,7 @@ func (s *Stack) handleIPv4(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, 
 		u := s.udp[k]
 		if u == nil {
 			var err error
-			u, err = newUDPConn(srcIP, srcPort, dstIP, dstPort, clientMAC, gwMAC, w)
+			u, err = newUDPConn(srcIP, srcPort, dstIP, dstPort, w)
 			if err != nil {
 				s.mu.Unlock()
 				return err

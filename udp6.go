@@ -8,19 +8,17 @@ import (
 )
 
 type udpConn6 struct {
-	mu        sync.Mutex
-	cSrcIP    [16]byte
-	cSrcPort  uint16
-	rIP       [16]byte
-	rPort     uint16
-	clientMAC [6]byte
-	gwMAC     [6]byte
-	w         Writer
-	conn      *net.UDPConn
-	lastAct   time.Time
+	mu       sync.Mutex
+	cSrcIP   [16]byte
+	cSrcPort uint16
+	rIP      [16]byte
+	rPort    uint16
+	w        Writer
+	conn     *net.UDPConn
+	lastAct  time.Time
 }
 
-func newUDPConn6(srcIP [16]byte, srcPort uint16, dstIP [16]byte, dstPort uint16, clientMAC, gwMAC [6]byte, w Writer) (*udpConn6, error) {
+func newUDPConn6(srcIP [16]byte, srcPort uint16, dstIP [16]byte, dstPort uint16, w Writer) (*udpConn6, error) {
 	raddr := &net.UDPAddr{IP: net.IP(dstIP[:]), Port: int(dstPort)}
 	c, err := net.DialUDP("udp", nil, raddr)
 	if err != nil {
@@ -29,7 +27,7 @@ func newUDPConn6(srcIP [16]byte, srcPort uint16, dstIP [16]byte, dstPort uint16,
 	u := &udpConn6{
 		cSrcIP: srcIP, cSrcPort: srcPort,
 		rIP: dstIP, rPort: dstPort,
-		clientMAC: clientMAC, gwMAC: gwMAC, w: w,
+		w:       w,
 		conn:    c,
 		lastAct: time.Now(),
 	}
@@ -100,15 +98,12 @@ func (u *udpConn6) readLoop() {
 		binary.BigEndian.PutUint16(udp[6:8], 0)
 		binary.BigEndian.PutUint16(udp[6:8], IPv6Checksum(u.rIP, u.cSrcIP, 17, uint32(len(udpWithPayload)), udpWithPayload))
 
-		// Build Ethernet frame
-		frame := make([]byte, 14+len(ip)+len(udp)+len(data))
-		copy(frame[0:6], u.clientMAC[:])
-		copy(frame[6:12], u.gwMAC[:])
-		binary.BigEndian.PutUint16(frame[12:14], 0x86DD) // IPv6 EtherType
-		copy(frame[14:], ip)
-		copy(frame[14+len(ip):], udp)
-		copy(frame[14+len(ip)+len(udp):], data)
-		_ = u.w(frame)
+		// Build raw IP packet (no Ethernet header)
+		pkt := make([]byte, len(ip)+len(udp)+len(data))
+		copy(pkt, ip)
+		copy(pkt[len(ip):], udp)
+		copy(pkt[len(ip)+len(udp):], data)
+		_ = u.w(pkt)
 
 		u.mu.Lock()
 		u.lastAct = time.Now()

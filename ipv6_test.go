@@ -7,8 +7,6 @@ import (
 
 func TestHandleIPv6_Basic(t *testing.T) {
 	s := New()
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
 	writer := func(b []byte) error { return nil }
 
 	// Create a minimal IPv6 TCP SYN packet
@@ -33,7 +31,7 @@ func TestHandleIPv6_Basic(t *testing.T) {
 	packet[52] = 0x50                                // Data offset (5 * 4 = 20 bytes)
 	packet[53] = 0x02                                // SYN flag
 
-	err := s.HandlePacket(0, clientMAC, gwMAC, packet, writer)
+	err := s.HandlePacket(0, packet, writer)
 	// IPv6 TCP should now work (dial will fail but no error returned)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -42,15 +40,13 @@ func TestHandleIPv6_Basic(t *testing.T) {
 
 func TestHandleIPv6_TooShort(t *testing.T) {
 	s := New()
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
 	writer := func(b []byte) error { return nil }
 
 	// Packet too short for IPv6 header
 	packet := make([]byte, 30)
 	packet[0] = 0x60 // Version 6
 
-	err := s.HandlePacket(0, clientMAC, gwMAC, packet, writer)
+	err := s.HandlePacket(0, packet, writer)
 	if err == nil {
 		t.Error("expected error for short packet, got nil")
 	} else if err.Error() != "IPv6 packet too short" {
@@ -60,8 +56,6 @@ func TestHandleIPv6_TooShort(t *testing.T) {
 
 func TestHandleIPv6_UDP(t *testing.T) {
 	s := New()
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
 	writer := func(b []byte) error { return nil }
 
 	// Create IPv6 UDP packet with some data
@@ -88,7 +82,7 @@ func TestHandleIPv6_UDP(t *testing.T) {
 	// Copy data
 	copy(packet[48:], data)
 
-	err := s.HandlePacket(0, clientMAC, gwMAC, packet, writer)
+	err := s.HandlePacket(0, packet, writer)
 	// IPv6 UDP should now work (dial will fail but no error returned)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -97,8 +91,6 @@ func TestHandleIPv6_UDP(t *testing.T) {
 
 func TestHandleIPv6_ICMPv6(t *testing.T) {
 	s := New()
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
 	writer := func(b []byte) error { return nil }
 
 	// Create IPv6 ICMPv6 packet
@@ -116,7 +108,7 @@ func TestHandleIPv6_ICMPv6(t *testing.T) {
 	packet[24] = 0xfe
 	packet[25] = 0x80
 
-	err := s.HandlePacket(0, clientMAC, gwMAC, packet, writer)
+	err := s.HandlePacket(0, packet, writer)
 	// ICMPv6 should return nil (silently ignored for now)
 	if err != nil {
 		t.Errorf("expected nil for ICMPv6, got %v", err)
@@ -150,8 +142,6 @@ func TestIPv6Checksum(t *testing.T) {
 
 func TestHandlePacket_IPv6Detection(t *testing.T) {
 	s := New()
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
 	writer := func(b []byte) error { return nil }
 
 	// Create minimal IPv6 TCP packet
@@ -171,7 +161,7 @@ func TestHandlePacket_IPv6Detection(t *testing.T) {
 	packet[52] = 0x50                                // Data offset
 	packet[53] = 0x02                                // SYN flag
 
-	err := s.HandlePacket(0, clientMAC, gwMAC, packet, writer)
+	err := s.HandlePacket(0, packet, writer)
 
 	// Should detect IPv6 and successfully handle it
 	if err != nil {

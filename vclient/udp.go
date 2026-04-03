@@ -27,9 +27,7 @@ type UDPConn struct {
 	remoteIP   [4]byte
 	remotePort uint16
 
-	mac   [6]byte
-	gwMAC [6]byte
-	c     *Client
+	c *Client
 
 	recvMu        sync.Mutex
 	recvBuf       [][]byte // queue of received datagrams
@@ -40,14 +38,12 @@ type UDPConn struct {
 	readDeadline atomic.Value // stores time.Time
 }
 
-func newUDPConn(c *Client, localIP [4]byte, localPort uint16, remoteIP [4]byte, remotePort uint16, gwMAC [6]byte) *UDPConn {
+func newUDPConn(c *Client, localIP [4]byte, localPort uint16, remoteIP [4]byte, remotePort uint16) *UDPConn {
 	u := &UDPConn{
 		localIP:    localIP,
 		localPort:  localPort,
 		remoteIP:   remoteIP,
 		remotePort: remotePort,
-		mac:        c.mac,
-		gwMAC:      gwMAC,
 		c:          c,
 	}
 	u.recvCond = sync.NewCond(&u.recvMu)
@@ -122,7 +118,7 @@ func (u *UDPConn) writePacket(payload []byte) (int, error) {
 	copy(pkt[len(ipHdr):], udpHdr)
 	copy(pkt[len(ipHdr)+len(udpHdr):], payload)
 
-	if err := u.c.sendIPv4(u.gwMAC, pkt); err != nil {
+	if err := u.c.sendPacket(pkt); err != nil {
 		return 0, err
 	}
 	return len(payload), nil
@@ -197,17 +193,6 @@ func (c *Client) handleUDP(ip []byte, ihl int) error {
 		return nil
 	}
 	payload := udp[8:udpLen]
-
-	// Check for DHCP response (server port 67, client port 68)
-	if srcPort == 67 && dstPort == 68 {
-		data := make([]byte, len(payload))
-		copy(data, payload)
-		select {
-		case c.dhcpCh <- data:
-		default:
-		}
-		return nil
-	}
 
 	k := connKey{localPort: dstPort, remoteIP: [4]byte(ip[12:16]), remotePort: srcPort}
 	c.udpMu.Lock()

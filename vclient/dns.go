@@ -26,12 +26,9 @@ func (c *Client) LookupHost(ctx context.Context, host string) ([]string, error) 
 	localIP := c.ip
 	c.mu.RUnlock()
 
-	// Resolve gateway MAC for sending
-	gwMAC := c.getGatewayMAC()
-
 	// Allocate ephemeral port and create UDP conn for DNS
 	port := c.allocPort()
-	conn := newUDPConn(c, localIP, port, dnsServer, 53, gwMAC)
+	conn := newUDPConn(c, localIP, port, dnsServer, 53)
 	c.udpMu.Lock()
 	c.udpConns[connKey{localPort: port, remoteIP: dnsServer, remotePort: 53}] = conn
 	c.udpMu.Unlock()
@@ -107,9 +104,8 @@ func (c *Client) Resolver() *net.Resolver {
 			localIP := c.ip
 			c.mu.RUnlock()
 
-			gwMAC := c.getGatewayMAC()
 			port := c.allocPort()
-			conn := newUDPConn(c, localIP, port, dnsServer, 53, gwMAC)
+			conn := newUDPConn(c, localIP, port, dnsServer, 53)
 			c.udpMu.Lock()
 			c.udpConns[connKey{localPort: port, remoteIP: dnsServer, remotePort: 53}] = conn
 			c.udpMu.Unlock()

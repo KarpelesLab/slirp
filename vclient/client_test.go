@@ -13,9 +13,6 @@ func TestPipeTCPEcho(t *testing.T) {
 	stack := slirp.New()
 	defer stack.Close()
 
-	clientMAC := [6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
-	gwMAC := [6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x02}
-
 	// Create a virtual listener on the stack
 	ln, err := stack.Listen("tcp", "10.0.0.1:9000")
 	if err != nil {
@@ -45,7 +42,7 @@ func TestPipeTCPEcho(t *testing.T) {
 	}()
 
 	// Create client via Pipe
-	client := vclient.Pipe(stack, 0, clientMAC, gwMAC)
+	client := vclient.Pipe(stack, 0)
 	defer client.Close()
 	client.SetIP(
 		net.IPv4(10, 0, 0, 2),
@@ -87,9 +84,6 @@ func TestPipeTCPLargeTransfer(t *testing.T) {
 	stack := slirp.New()
 	defer stack.Close()
 
-	clientMAC := [6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x03}
-	gwMAC := [6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x04}
-
 	ln, err := stack.Listen("tcp", "10.0.0.1:9001")
 	if err != nil {
 		t.Fatal(err)
@@ -119,7 +113,7 @@ func TestPipeTCPLargeTransfer(t *testing.T) {
 		}
 	}()
 
-	client := vclient.Pipe(stack, 0, clientMAC, gwMAC)
+	client := vclient.Pipe(stack, 0)
 	defer client.Close()
 	client.SetIP(
 		net.IPv4(10, 0, 0, 2),
@@ -172,10 +166,7 @@ func TestPipeUDP(t *testing.T) {
 	stack := slirp.New()
 	defer stack.Close()
 
-	clientMAC := [6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x05}
-	gwMAC := [6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x06}
-
-	client := vclient.Pipe(stack, 0, clientMAC, gwMAC)
+	client := vclient.Pipe(stack, 0)
 	defer client.Close()
 	client.SetIP(
 		net.IPv4(10, 0, 0, 2),
@@ -200,7 +191,7 @@ func TestPipeUDP(t *testing.T) {
 }
 
 func TestClientSetIP(t *testing.T) {
-	client := vclient.New([6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}, nil)
+	client := vclient.New(nil)
 	defer client.Close()
 
 	client.SetIP(
@@ -217,22 +208,19 @@ func TestClientSetIP(t *testing.T) {
 
 // TestClientListen tests the vclient's Listen/Accept using two vclients
 // connected via loopback: each client's Writer delivers directly to the
-// other's HandleFrame.
+// other's HandlePacket.
 func TestClientListen(t *testing.T) {
-	serverMAC := [6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
-	clientMAC := [6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x02}
-
-	// Two clients wired directly: A's output → B's HandleFrame, and vice versa.
+	// Two clients wired directly: A's output -> B's HandlePacket, and vice versa.
 	var serverClient, dialClient *vclient.Client
 
-	serverClient = vclient.New(serverMAC, nil)
-	dialClient = vclient.New(clientMAC, nil)
+	serverClient = vclient.New(nil)
+	dialClient = vclient.New(nil)
 
-	serverClient.SetWriter(func(frame []byte) error {
-		return dialClient.HandleFrame(frame)
+	serverClient.SetWriter(func(packet []byte) error {
+		return dialClient.HandlePacket(packet)
 	})
-	dialClient.SetWriter(func(frame []byte) error {
-		return serverClient.HandleFrame(frame)
+	dialClient.SetWriter(func(packet []byte) error {
+		return serverClient.HandlePacket(packet)
 	})
 
 	defer serverClient.Close()
@@ -240,10 +228,6 @@ func TestClientListen(t *testing.T) {
 
 	serverClient.SetIP(net.IPv4(10, 0, 0, 1), net.IPv4Mask(255, 255, 255, 0), net.IPv4(10, 0, 0, 2))
 	dialClient.SetIP(net.IPv4(10, 0, 0, 2), net.IPv4Mask(255, 255, 255, 0), net.IPv4(10, 0, 0, 1))
-
-	// Pre-configure ARP so they know each other's MAC
-	serverClient.SetGatewayMAC(clientMAC)
-	dialClient.SetGatewayMAC(serverMAC)
 
 	// Server listens on port 8080
 	ln, err := serverClient.Listen("tcp", "10.0.0.1:8080")
@@ -302,7 +286,7 @@ func TestClientListen(t *testing.T) {
 
 // TestClientListenDuplicate tests that double-listen on the same port fails.
 func TestClientListenDuplicate(t *testing.T) {
-	client := vclient.New([6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}, nil)
+	client := vclient.New(nil)
 	defer client.Close()
 	client.SetIP(net.IPv4(10, 0, 0, 2), net.IPv4Mask(255, 255, 255, 0), net.IPv4(10, 0, 0, 1))
 
@@ -320,7 +304,7 @@ func TestClientListenDuplicate(t *testing.T) {
 
 // TestClientListenClose tests that Accept returns error after Close.
 func TestClientListenClose(t *testing.T) {
-	client := vclient.New([6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}, nil)
+	client := vclient.New(nil)
 	defer client.Close()
 	client.SetIP(net.IPv4(10, 0, 0, 2), net.IPv4Mask(255, 255, 255, 0), net.IPv4(10, 0, 0, 1))
 

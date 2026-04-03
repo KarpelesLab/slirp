@@ -11,11 +11,9 @@ import (
 func TestNewUDPConn(t *testing.T) {
 	srcIP := [4]byte{192, 168, 1, 1}
 	dstIP := [4]byte{127, 0, 0, 1}
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
 	writer := func(b []byte) error { return nil }
 
-	conn, err := newUDPConn(srcIP, 12345, dstIP, 9999, clientMAC, gwMAC, writer)
+	conn, err := newUDPConn(srcIP, 12345, dstIP, 9999, writer)
 	if err != nil {
 		t.Skipf("cannot create UDP connection: %v", err)
 	}
@@ -41,11 +39,9 @@ func TestNewUDPConn(t *testing.T) {
 func TestNewUDPConn_Cleanup(t *testing.T) {
 	srcIP := [4]byte{127, 0, 0, 1}
 	dstIP := [4]byte{127, 0, 0, 1}
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
 	writer := func(b []byte) error { return nil }
 
-	conn, err := newUDPConn(srcIP, 12345, dstIP, 9999, clientMAC, gwMAC, writer)
+	conn, err := newUDPConn(srcIP, 12345, dstIP, 9999, writer)
 	if err != nil {
 		t.Skipf("cannot create UDP connection: %v", err)
 	}
@@ -87,9 +83,6 @@ func TestUDPConnHandleOutbound(t *testing.T) {
 
 	srcIP := [4]byte{127, 0, 0, 1}
 	dstIP := [4]byte{127, 0, 0, 1}
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
-
 	var receivedFrames [][]byte
 	var mu sync.Mutex
 	writer := func(b []byte) error {
@@ -101,7 +94,7 @@ func TestUDPConnHandleOutbound(t *testing.T) {
 		return nil
 	}
 
-	conn, err := newUDPConn(srcIP, 54321, dstIP, uint16(actualServerAddr.Port), clientMAC, gwMAC, writer)
+	conn, err := newUDPConn(srcIP, 54321, dstIP, uint16(actualServerAddr.Port), writer)
 	if err != nil {
 		t.Fatalf("newUDPConn failed: %v", err)
 	}
@@ -145,9 +138,6 @@ func TestUDPConnReadLoop(t *testing.T) {
 
 	srcIP := [4]byte{127, 0, 0, 1}
 	dstIP := [4]byte{127, 0, 0, 1}
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
-
 	var receivedFrames [][]byte
 	var mu sync.Mutex
 	writer := func(b []byte) error {
@@ -159,7 +149,7 @@ func TestUDPConnReadLoop(t *testing.T) {
 		return nil
 	}
 
-	conn, err := newUDPConn(srcIP, 54321, dstIP, uint16(actualServerAddr.Port), clientMAC, gwMAC, writer)
+	conn, err := newUDPConn(srcIP, 54321, dstIP, uint16(actualServerAddr.Port), writer)
 	if err != nil {
 		t.Fatalf("newUDPConn failed: %v", err)
 	}
@@ -188,11 +178,9 @@ func TestUDPConnReadLoop(t *testing.T) {
 func TestUDPConnLastAct(t *testing.T) {
 	srcIP := [4]byte{127, 0, 0, 1}
 	dstIP := [4]byte{127, 0, 0, 1}
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
 	writer := func(b []byte) error { return nil }
 
-	conn, err := newUDPConn(srcIP, 54321, dstIP, 9999, clientMAC, gwMAC, writer)
+	conn, err := newUDPConn(srcIP, 54321, dstIP, 9999, writer)
 	if err != nil {
 		t.Skipf("cannot create UDP connection: %v", err)
 	}
@@ -294,9 +282,6 @@ func TestHandlePacket_UDP(t *testing.T) {
 
 	srcIP := [4]byte{127, 0, 0, 1}
 	dstIP := [4]byte{127, 0, 0, 1}
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
-
 	var receivedFrames [][]byte
 	var mu sync.Mutex
 	writer := func(b []byte) error {
@@ -311,7 +296,7 @@ func TestHandlePacket_UDP(t *testing.T) {
 	payload := []byte("Hello from test!")
 	udpPacket := createUDPPacket(srcIP, dstIP, 54321, uint16(actualServerAddr.Port), payload)
 
-	err = s.HandlePacket(0, clientMAC, gwMAC, udpPacket, writer)
+	err = s.HandlePacket(0, udpPacket, writer)
 	if err != nil {
 		t.Fatalf("HandlePacket failed: %v", err)
 	}
@@ -340,11 +325,9 @@ func TestHandlePacket_UDP(t *testing.T) {
 func TestUDPConnShortPacket(t *testing.T) {
 	srcIP := [4]byte{127, 0, 0, 1}
 	dstIP := [4]byte{127, 0, 0, 1}
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
 	writer := func(b []byte) error { return nil }
 
-	conn, err := newUDPConn(srcIP, 54321, dstIP, 9999, clientMAC, gwMAC, writer)
+	conn, err := newUDPConn(srcIP, 54321, dstIP, 9999, writer)
 	if err != nil {
 		t.Skipf("cannot create UDP connection: %v", err)
 	}

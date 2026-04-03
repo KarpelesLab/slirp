@@ -78,9 +78,6 @@ func TestVirtualConnection(t *testing.T) {
 	}
 	defer listener.Close()
 
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
-
 	var receivedFrames [][]byte
 	var mu sync.Mutex
 	writer := func(b []byte) error {
@@ -133,7 +130,7 @@ func TestVirtualConnection(t *testing.T) {
 	dstPort := uint16(9000)
 
 	synPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 1000, 0, 0x02, nil)
-	err = s.HandlePacket(0, clientMAC, gwMAC, synPkt, writer)
+	err = s.HandlePacket(0, synPkt, writer)
 	if err != nil {
 		t.Fatalf("HandlePacket SYN failed: %v", err)
 	}
@@ -151,10 +148,10 @@ func TestVirtualConnection(t *testing.T) {
 
 	// Parse SYN-ACK to get server's seq
 	synAckFrame := receivedFrames[0]
-	if len(synAckFrame) < 14+20+20 {
+	if len(synAckFrame) < 20+20 {
 		t.Fatal("SYN-ACK frame too short")
 	}
-	tcpHeader := synAckFrame[14+20:]
+	tcpHeader := synAckFrame[20:]
 	serverSeq := binary.BigEndian.Uint32(tcpHeader[4:8])
 	serverAck := binary.BigEndian.Uint32(tcpHeader[8:12])
 
@@ -164,7 +161,7 @@ func TestVirtualConnection(t *testing.T) {
 
 	// Send ACK to complete handshake
 	ackPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 1001, serverSeq+1, 0x10, nil)
-	err = s.HandlePacket(0, clientMAC, gwMAC, ackPkt, writer)
+	err = s.HandlePacket(0, ackPkt, writer)
 	if err != nil {
 		t.Fatalf("HandlePacket ACK failed: %v", err)
 	}
@@ -174,7 +171,7 @@ func TestVirtualConnection(t *testing.T) {
 	// Send data
 	payload := []byte("Hello, virtual server!")
 	dataPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 1001, serverSeq+1, 0x18, payload)
-	err = s.HandlePacket(0, clientMAC, gwMAC, dataPkt, writer)
+	err = s.HandlePacket(0, dataPkt, writer)
 	if err != nil {
 		t.Fatalf("HandlePacket data failed: %v", err)
 	}
@@ -237,9 +234,6 @@ func TestTwoSlirpConnection(t *testing.T) {
 	}()
 
 	// Client connection through the same stack
-	clientMAC := [6]byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01}
-	gwMAC := [6]byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x02}
-
 	var receivedFrames [][]byte
 	var mu sync.Mutex
 	writer := func(b []byte) error {
@@ -258,7 +252,7 @@ func TestTwoSlirpConnection(t *testing.T) {
 
 	// Send SYN
 	synPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 5000, 0, 0x02, nil)
-	err = stack.HandlePacket(0, clientMAC, gwMAC, synPkt, writer)
+	err = stack.HandlePacket(0, synPkt, writer)
 	if err != nil {
 		t.Fatalf("Client SYN failed: %v", err)
 	}
@@ -275,15 +269,15 @@ func TestTwoSlirpConnection(t *testing.T) {
 	mu.Unlock()
 
 	// Parse SYN-ACK
-	if len(synAckFrame) < 14+20+20 {
+	if len(synAckFrame) < 20+20 {
 		t.Fatal("SYN-ACK frame too short")
 	}
-	tcpHeader := synAckFrame[14+20:]
+	tcpHeader := synAckFrame[20:]
 	serverSeq := binary.BigEndian.Uint32(tcpHeader[4:8])
 
 	// Send ACK to complete handshake
 	ackPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 5001, serverSeq+1, 0x10, nil)
-	err = stack.HandlePacket(0, clientMAC, gwMAC, ackPkt, writer)
+	err = stack.HandlePacket(0, ackPkt, writer)
 	if err != nil {
 		t.Fatalf("Client ACK failed: %v", err)
 	}
@@ -293,7 +287,7 @@ func TestTwoSlirpConnection(t *testing.T) {
 	// Send data
 	testData := []byte("Hello virtual server!")
 	dataPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 5001, serverSeq+1, 0x18, testData)
-	err = stack.HandlePacket(0, clientMAC, gwMAC, dataPkt, writer)
+	err = stack.HandlePacket(0, dataPkt, writer)
 	if err != nil {
 		t.Fatalf("Client data send failed: %v", err)
 	}
@@ -338,8 +332,6 @@ func TestVirtualConnHandleInboundRST(t *testing.T) {
 	}
 	defer listener.Close()
 
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
 	writer := func(b []byte) error { return nil }
 
 	srcIP := [4]byte{192, 168, 1, 50}
@@ -349,7 +341,7 @@ func TestVirtualConnHandleInboundRST(t *testing.T) {
 
 	// Send SYN to create the virtual connection
 	synPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 1000, 0, 0x02, nil)
-	err = s.HandlePacket(0, clientMAC, gwMAC, synPkt, writer)
+	err = s.HandlePacket(0, synPkt, writer)
 	if err != nil {
 		t.Fatalf("HandlePacket SYN failed: %v", err)
 	}
@@ -368,7 +360,7 @@ func TestVirtualConnHandleInboundRST(t *testing.T) {
 
 	// Now send RST - vtcp.Conn handles RST regardless of seq/ack values
 	rstPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 1001, 0, 0x04, nil)
-	err = s.HandlePacket(0, clientMAC, gwMAC, rstPkt, writer)
+	err = s.HandlePacket(0, rstPkt, writer)
 	if err != nil {
 		t.Fatalf("HandlePacket RST failed: %v", err)
 	}
@@ -387,9 +379,6 @@ func TestVirtualConnHandleInboundFIN(t *testing.T) {
 		t.Fatalf("Listen failed: %v", err)
 	}
 	defer listener.Close()
-
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
 
 	var receivedFrames [][]byte
 	var mu sync.Mutex
@@ -423,7 +412,7 @@ func TestVirtualConnHandleInboundFIN(t *testing.T) {
 
 	// SYN
 	synPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 2000, 0, 0x02, nil)
-	_ = s.HandlePacket(0, clientMAC, gwMAC, synPkt, writer)
+	_ = s.HandlePacket(0, synPkt, writer)
 	time.Sleep(50 * time.Millisecond)
 
 	// Get server seq from SYN-ACK
@@ -434,17 +423,17 @@ func TestVirtualConnHandleInboundFIN(t *testing.T) {
 	}
 	synAckFrame := receivedFrames[0]
 	mu.Unlock()
-	tcpHeader := synAckFrame[14+20:]
+	tcpHeader := synAckFrame[20:]
 	serverSeq := binary.BigEndian.Uint32(tcpHeader[4:8])
 
 	// ACK to complete handshake
 	ackPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 2001, serverSeq+1, 0x10, nil)
-	_ = s.HandlePacket(0, clientMAC, gwMAC, ackPkt, writer)
+	_ = s.HandlePacket(0, ackPkt, writer)
 	time.Sleep(50 * time.Millisecond)
 
 	// Send FIN+ACK (RFC 9293 requires ACK on all synchronized segments)
 	finPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 2001, serverSeq+1, 0x11, nil)
-	_ = s.HandlePacket(0, clientMAC, gwMAC, finPkt, writer)
+	_ = s.HandlePacket(0, finPkt, writer)
 	time.Sleep(50 * time.Millisecond)
 
 	// Check that an ACK was sent in response to FIN
@@ -454,8 +443,8 @@ func TestVirtualConnHandleInboundFIN(t *testing.T) {
 		if i == 0 {
 			continue // skip SYN-ACK
 		}
-		if len(frame) >= 14+20+20 {
-			hdr := frame[14+20:]
+		if len(frame) >= 20+20 {
+			hdr := frame[20:]
 			flags := hdr[13]
 			if (flags & 0x10) != 0 { // ACK flag set
 				ackFound = true
@@ -485,9 +474,6 @@ func TestVirtualConnHandleInboundData(t *testing.T) {
 		t.Fatalf("Listen failed: %v", err)
 	}
 	defer listener.Close()
-
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
 
 	var receivedFrames [][]byte
 	var mu sync.Mutex
@@ -525,7 +511,7 @@ func TestVirtualConnHandleInboundData(t *testing.T) {
 
 	// SYN
 	synPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 5000, 0, 0x02, nil)
-	_ = s.HandlePacket(0, clientMAC, gwMAC, synPkt, writer)
+	_ = s.HandlePacket(0, synPkt, writer)
 	time.Sleep(50 * time.Millisecond)
 
 	// Parse SYN-ACK
@@ -536,18 +522,18 @@ func TestVirtualConnHandleInboundData(t *testing.T) {
 	}
 	synAckFrame := receivedFrames[0]
 	mu.Unlock()
-	tcpHeader := synAckFrame[14+20:]
+	tcpHeader := synAckFrame[20:]
 	serverSeq := binary.BigEndian.Uint32(tcpHeader[4:8])
 
 	// ACK to complete handshake
 	ackPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 5001, serverSeq+1, 0x10, nil)
-	_ = s.HandlePacket(0, clientMAC, gwMAC, ackPkt, writer)
+	_ = s.HandlePacket(0, ackPkt, writer)
 	time.Sleep(50 * time.Millisecond)
 
 	// Send data
 	payload := []byte("hello from client")
 	dataPkt := createTCPPacket(srcIP, dstIP, srcPort, dstPort, 5001, serverSeq+1, 0x18, payload)
-	_ = s.HandlePacket(0, clientMAC, gwMAC, dataPkt, writer)
+	_ = s.HandlePacket(0, dataPkt, writer)
 
 	// Verify server received the data
 	select {
@@ -566,8 +552,8 @@ func TestVirtualConnHandleInboundData(t *testing.T) {
 		if i == 0 {
 			continue // skip SYN-ACK
 		}
-		if len(frame) >= 14+20+20 {
-			hdr := frame[14+20:]
+		if len(frame) >= 20+20 {
+			hdr := frame[20:]
 			flags := hdr[13]
 			if (flags & 0x10) != 0 { // ACK
 				ackSent = true

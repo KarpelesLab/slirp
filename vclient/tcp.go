@@ -90,14 +90,13 @@ func (c *Client) handleTCP(ip []byte, ihl int) error {
 	localAddr := &net.TCPAddr{IP: net.IP(dstIP[:]).To4(), Port: int(dstPort)}
 	remoteAddr := &net.TCPAddr{IP: net.IP(srcIP[:]).To4(), Port: int(srcPort)}
 
-	gwMAC := c.getGatewayMAC()
 	vc := vtcp.NewConn(vtcp.ConnConfig{
 		LocalPort:  dstPort,
 		RemotePort: srcPort,
 		LocalAddr:  localAddr,
 		RemoteAddr: remoteAddr,
 		Writer: func(tcpSeg []byte) error {
-			return c.sendIPv4(gwMAC, buildIPv4Packet(dstIP, srcIP, tcpSeg))
+			return c.sendPacket(buildIPv4Packet(dstIP, srcIP, tcpSeg))
 		},
 		MSS:       1460,
 		Keepalive: true,

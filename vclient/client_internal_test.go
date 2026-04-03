@@ -5,18 +5,8 @@ import (
 	"testing"
 )
 
-func TestMAC(t *testing.T) {
-	mac := [6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
-	c := New(mac, func([]byte) error { return nil })
-	defer c.Close()
-
-	if c.MAC() != mac {
-		t.Errorf("MAC() = %v, want %v", c.MAC(), mac)
-	}
-}
-
 func TestSetDNS(t *testing.T) {
-	c := New([6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, func([]byte) error { return nil })
+	c := New(func([]byte) error { return nil })
 	defer c.Close()
 
 	c.SetDNS([]net.IP{net.IPv4(8, 8, 8, 8), net.IPv4(8, 8, 4, 4)})
@@ -35,7 +25,7 @@ func TestSetDNS(t *testing.T) {
 }
 
 func TestHTTPClient(t *testing.T) {
-	c := New([6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, func([]byte) error { return nil })
+	c := New(func([]byte) error { return nil })
 	defer c.Close()
 
 	hc := c.HTTPClient()
@@ -49,16 +39,15 @@ func TestHTTPClient(t *testing.T) {
 
 func TestUDPConnWritePacket(t *testing.T) {
 	var sent []byte
-	c := New([6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, func(frame []byte) error {
-		sent = make([]byte, len(frame))
-		copy(sent, frame)
+	c := New(func(packet []byte) error {
+		sent = make([]byte, len(packet))
+		copy(sent, packet)
 		return nil
 	})
 	defer c.Close()
 	c.SetIP(net.IPv4(10, 0, 0, 2), net.IPv4Mask(255, 255, 255, 0), net.IPv4(10, 0, 0, 1))
 
-	conn := newUDPConn(c, [4]byte{10, 0, 0, 2}, 50000, [4]byte{10, 0, 0, 1}, 12345,
-		[6]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
+	conn := newUDPConn(c, [4]byte{10, 0, 0, 2}, 50000, [4]byte{10, 0, 0, 1}, 12345)
 
 	n, err := conn.writePacket([]byte("test"))
 	if err != nil {
@@ -68,71 +57,16 @@ func TestUDPConnWritePacket(t *testing.T) {
 		t.Errorf("writePacket returned %d, want 4", n)
 	}
 	if sent == nil {
-		t.Fatal("no frame was sent")
+		t.Fatal("no packet was sent")
 	}
-	// Frame should be: 14 (eth) + 20 (IP) + 8 (UDP) + 4 (payload) = 46 bytes
-	if len(sent) != 46 {
-		t.Errorf("frame length = %d, want 46", len(sent))
-	}
-}
-
-func TestHandleFrameARP(t *testing.T) {
-	c := New([6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, func([]byte) error { return nil })
-	defer c.Close()
-	c.SetIP(net.IPv4(10, 0, 0, 2), net.IPv4Mask(255, 255, 255, 0), net.IPv4(10, 0, 0, 1))
-
-	// Build minimal ARP frame (14 eth + 28 arp = 42 bytes)
-	frame := make([]byte, 42)
-	// Ethernet: dst, src, type=0x0806
-	frame[12] = 0x08
-	frame[13] = 0x06
-	// ARP: hwtype=1, proto=0x0800, hlen=6, plen=4, oper=1 (request)
-	frame[14] = 0
-	frame[15] = 1
-	frame[16] = 0x08
-	frame[17] = 0x00
-	frame[18] = 6
-	frame[19] = 4
-	frame[20] = 0
-	frame[21] = 1 // request
-	// Target IP = our IP (10.0.0.2)
-	frame[38] = 10
-	frame[40] = 0
-	frame[41] = 2
-
-	err := c.HandleFrame(frame)
-	if err != nil {
-		t.Fatalf("HandleFrame ARP: %v", err)
-	}
-}
-
-func TestHandleFrameShort(t *testing.T) {
-	c := New([6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, func([]byte) error { return nil })
-	defer c.Close()
-
-	// Frame too short
-	err := c.HandleFrame([]byte{0x00, 0x01})
-	if err != nil {
-		t.Errorf("HandleFrame should return nil for short frame, got: %v", err)
-	}
-}
-
-func TestHandleFrameUnknownEtherType(t *testing.T) {
-	c := New([6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, func([]byte) error { return nil })
-	defer c.Close()
-
-	frame := make([]byte, 20)
-	frame[12] = 0x99 // unknown ethertype
-	frame[13] = 0x99
-
-	err := c.HandleFrame(frame)
-	if err != nil {
-		t.Errorf("HandleFrame should return nil for unknown ethertype, got: %v", err)
+	// Packet should be: 20 (IP) + 8 (UDP) + 4 (payload) = 32 bytes
+	if len(sent) != 32 {
+		t.Errorf("packet length = %d, want 32", len(sent))
 	}
 }
 
 func TestAllocPortWrap(t *testing.T) {
-	c := New([6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, func([]byte) error { return nil })
+	c := New(func([]byte) error { return nil })
 	defer c.Close()
 
 	c.portMu.Lock()
@@ -149,18 +83,18 @@ func TestAllocPortWrap(t *testing.T) {
 	}
 }
 
-func TestSendIPv4NoWriter(t *testing.T) {
-	c := New([6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, nil)
+func TestSendPacketNoWriter(t *testing.T) {
+	c := New(nil)
 	defer c.Close()
 
-	err := c.sendIPv4([6]byte{}, []byte{0x45})
+	err := c.sendPacket([]byte{0x45})
 	if err == nil {
 		t.Error("expected error with nil writer")
 	}
 }
 
 func TestResolverReturnValue(t *testing.T) {
-	c := New([6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, func([]byte) error { return nil })
+	c := New(func([]byte) error { return nil })
 	defer c.Close()
 	c.SetDNS([]net.IP{net.IPv4(8, 8, 8, 8)})
 

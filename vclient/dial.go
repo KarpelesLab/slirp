@@ -53,27 +53,21 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 	}
 	copy(remoteIP[:], ip4)
 
-	// Resolve gateway MAC
-	gwMAC, err := c.resolveMAC(ctx, remoteIP)
-	if err != nil {
-		return nil, err
-	}
-
 	c.mu.RLock()
 	localIP := c.ip
 	c.mu.RUnlock()
 
 	switch network {
 	case "tcp", "tcp4":
-		return c.dialTCP(ctx, localIP, remoteIP, uint16(port), gwMAC)
+		return c.dialTCP(ctx, localIP, remoteIP, uint16(port))
 	case "udp", "udp4":
-		return c.dialUDP(localIP, remoteIP, uint16(port), gwMAC)
+		return c.dialUDP(localIP, remoteIP, uint16(port))
 	default:
 		return nil, errors.New("unsupported network: " + network)
 	}
 }
 
-func (c *Client) dialTCP(ctx context.Context, localIP, remoteIP [4]byte, remotePort uint16, gwMAC [6]byte) (net.Conn, error) {
+func (c *Client) dialTCP(ctx context.Context, localIP, remoteIP [4]byte, remotePort uint16) (net.Conn, error) {
 	localPort := c.allocPort()
 
 	localAddr := &net.TCPAddr{IP: net.IP(localIP[:]).To4(), Port: int(localPort)}
@@ -85,7 +79,7 @@ func (c *Client) dialTCP(ctx context.Context, localIP, remoteIP [4]byte, remoteP
 		LocalAddr:  localAddr,
 		RemoteAddr: remoteAddr,
 		Writer: func(tcpSeg []byte) error {
-			return c.sendIPv4(gwMAC, buildIPv4Packet(localIP, remoteIP, tcpSeg))
+			return c.sendPacket(buildIPv4Packet(localIP, remoteIP, tcpSeg))
 		},
 		MSS:       1460,
 		Keepalive: true,
@@ -109,9 +103,9 @@ func (c *Client) dialTCP(ctx context.Context, localIP, remoteIP [4]byte, remoteP
 	return conn, nil
 }
 
-func (c *Client) dialUDP(localIP, remoteIP [4]byte, remotePort uint16, gwMAC [6]byte) (net.Conn, error) {
+func (c *Client) dialUDP(localIP, remoteIP [4]byte, remotePort uint16) (net.Conn, error) {
 	localPort := c.allocPort()
-	conn := newUDPConn(c, localIP, localPort, remoteIP, remotePort, gwMAC)
+	conn := newUDPConn(c, localIP, localPort, remoteIP, remotePort)
 
 	k := connKey{localPort: localPort, remoteIP: remoteIP, remotePort: remotePort}
 	c.udpMu.Lock()

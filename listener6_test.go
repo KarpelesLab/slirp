@@ -38,8 +38,6 @@ func TestVirtualConnection6(t *testing.T) {
 	t.Skip("Complex integration test - needs refinement")
 
 	s := New()
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
 
 	// Create listener
 	listener, err := s.Listen("tcp6", "[::1]:9000")
@@ -82,11 +80,11 @@ func TestVirtualConnection6(t *testing.T) {
 	var receivedData []byte
 	var writer func([]byte) error
 	writer = func(frame []byte) error {
-		if len(frame) < 14+40+20 {
+		if len(frame) < 40+20 {
 			return nil
 		}
 		// Extract TCP payload from frame
-		tcp := frame[14+40:]
+		tcp := frame[40:]
 		doff := int((tcp[12]>>4)&0x0F) * 4
 		if len(tcp) > doff {
 			payload := tcp[doff:]
@@ -94,7 +92,7 @@ func TestVirtualConnection6(t *testing.T) {
 				receivedData = append(receivedData, payload...)
 			}
 		}
-		return s.HandlePacket(0, clientMAC, gwMAC, frame[14:], writer)
+		return s.HandlePacket(0, frame, writer)
 	}
 
 	// Send SYN packet
@@ -111,7 +109,7 @@ func TestVirtualConnection6(t *testing.T) {
 	synPacket[52] = 0x50                                // Data offset
 	synPacket[53] = 0x02                                // SYN flag
 
-	err = s.HandlePacket(0, clientMAC, gwMAC, synPacket, writer)
+	err = s.HandlePacket(0, synPacket, writer)
 	if err != nil {
 		t.Fatalf("HandlePacket(SYN) failed: %v", err)
 	}
@@ -124,7 +122,7 @@ func TestVirtualConnection6(t *testing.T) {
 	ackPacket[53] = 0x10                               // ACK flag
 
 	time.Sleep(10 * time.Millisecond)
-	err = s.HandlePacket(0, clientMAC, gwMAC, ackPacket, writer)
+	err = s.HandlePacket(0, ackPacket, writer)
 	if err != nil {
 		t.Fatalf("HandlePacket(ACK) failed: %v", err)
 	}
@@ -138,7 +136,7 @@ func TestVirtualConnection6(t *testing.T) {
 	copy(dataPacket[60:], testData)
 
 	time.Sleep(10 * time.Millisecond)
-	err = s.HandlePacket(0, clientMAC, gwMAC, dataPacket, writer)
+	err = s.HandlePacket(0, dataPacket, writer)
 	if err != nil {
 		t.Fatalf("HandlePacket(data) failed: %v", err)
 	}
@@ -180,9 +178,6 @@ func TestIPv6VirtualListenerFullHandshake(t *testing.T) {
 	}
 	defer listener.Close()
 
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
-
 	var receivedFrames [][]byte
 	var mu sync.Mutex
 	writer := func(b []byte) error {
@@ -220,7 +215,7 @@ func TestIPv6VirtualListenerFullHandshake(t *testing.T) {
 
 	// SYN
 	synPkt := createTCPPacket6(srcIP, dstIP, srcPort, dstPort, 1000, 0, 0x02, nil)
-	err = s.HandlePacket(0, clientMAC, gwMAC, synPkt, writer)
+	err = s.HandlePacket(0, synPkt, writer)
 	if err != nil {
 		t.Fatalf("HandlePacket SYN failed: %v", err)
 	}
@@ -236,10 +231,10 @@ func TestIPv6VirtualListenerFullHandshake(t *testing.T) {
 	synAckFrame := receivedFrames[0]
 	mu.Unlock()
 
-	if len(synAckFrame) < 14+40+20 {
+	if len(synAckFrame) < 40+20 {
 		t.Fatal("SYN-ACK frame too short")
 	}
-	tcpHeader := synAckFrame[14+40:]
+	tcpHeader := synAckFrame[40:]
 	serverSeq := binary.BigEndian.Uint32(tcpHeader[4:8])
 	serverAck := binary.BigEndian.Uint32(tcpHeader[8:12])
 
@@ -249,7 +244,7 @@ func TestIPv6VirtualListenerFullHandshake(t *testing.T) {
 
 	// ACK to complete handshake
 	ackPkt := createTCPPacket6(srcIP, dstIP, srcPort, dstPort, 1001, serverSeq+1, 0x10, nil)
-	err = s.HandlePacket(0, clientMAC, gwMAC, ackPkt, writer)
+	err = s.HandlePacket(0, ackPkt, writer)
 	if err != nil {
 		t.Fatalf("HandlePacket ACK failed: %v", err)
 	}
@@ -259,7 +254,7 @@ func TestIPv6VirtualListenerFullHandshake(t *testing.T) {
 	// Send data
 	testData := []byte("IPv6 virtual data!")
 	dataPkt := createTCPPacket6(srcIP, dstIP, srcPort, dstPort, 1001, serverSeq+1, 0x18, testData)
-	err = s.HandlePacket(0, clientMAC, gwMAC, dataPkt, writer)
+	err = s.HandlePacket(0, dataPkt, writer)
 	if err != nil {
 		t.Fatalf("HandlePacket data failed: %v", err)
 	}

@@ -8,19 +8,17 @@ import (
 )
 
 type udpConn struct {
-	mu        sync.Mutex
-	cSrcIP    [4]byte
-	cSrcPort  uint16
-	rIP       [4]byte
-	rPort     uint16
-	clientMAC [6]byte
-	gwMAC     [6]byte
-	w         Writer
-	conn      *net.UDPConn
-	lastAct   time.Time
+	mu       sync.Mutex
+	cSrcIP   [4]byte
+	cSrcPort uint16
+	rIP      [4]byte
+	rPort    uint16
+	w        Writer
+	conn     *net.UDPConn
+	lastAct  time.Time
 }
 
-func newUDPConn(srcIP [4]byte, srcPort uint16, dstIP [4]byte, dstPort uint16, clientMAC, gwMAC [6]byte, w Writer) (*udpConn, error) {
+func newUDPConn(srcIP [4]byte, srcPort uint16, dstIP [4]byte, dstPort uint16, w Writer) (*udpConn, error) {
 	raddr := &net.UDPAddr{IP: net.IP(dstIP[:]), Port: int(dstPort)}
 	c, err := net.DialUDP("udp", nil, raddr)
 	if err != nil {
@@ -29,7 +27,7 @@ func newUDPConn(srcIP [4]byte, srcPort uint16, dstIP [4]byte, dstPort uint16, cl
 	u := &udpConn{
 		cSrcIP: srcIP, cSrcPort: srcPort,
 		rIP: dstIP, rPort: dstPort,
-		clientMAC: clientMAC, gwMAC: gwMAC, w: w,
+		w:       w,
 		conn:    c,
 		lastAct: time.Now(),
 	}
@@ -87,14 +85,11 @@ func (u *udpConn) readLoop() {
 		binary.BigEndian.PutUint16(udp[6:8], 0)
 		binary.BigEndian.PutUint16(udp[6:8], UDPChecksum(ip[12:16], ip[16:20], udp, data))
 
-		frame := make([]byte, 14+len(ip)+len(udp)+len(data))
-		copy(frame[0:6], u.clientMAC[:])
-		copy(frame[6:12], u.gwMAC[:])
-		binary.BigEndian.PutUint16(frame[12:14], 0x0800)
-		copy(frame[14:], ip)
-		copy(frame[14+len(ip):], udp)
-		copy(frame[14+len(ip)+len(udp):], data)
-		_ = u.w(frame)
+		pkt := make([]byte, len(ip)+len(udp)+len(data))
+		copy(pkt, ip)
+		copy(pkt[len(ip):], udp)
+		copy(pkt[len(ip)+len(udp):], data)
+		_ = u.w(pkt)
 		u.mu.Lock()
 		u.lastAct = time.Now()
 		u.mu.Unlock()

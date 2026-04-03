@@ -18,7 +18,7 @@ type key6 struct {
 }
 
 // handleIPv6 processes an IPv6 packet
-func (s *Stack) handleIPv6(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, packet []byte, w Writer) error {
+func (s *Stack) handleIPv6(namespace uintptr, packet []byte, w Writer) error {
 	// IPv6 header is fixed 40 bytes
 	if len(packet) < 40 {
 		return errors.New("IPv6 packet too short")
@@ -52,19 +52,19 @@ func (s *Stack) handleIPv6(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, 
 		if len(packet) < transportOff+20 {
 			return nil
 		}
-		return s.handleIPv6TCP(namespace, clientMAC, gwMAC, packet, srcIP, dstIP, transportOff, w)
+		return s.handleIPv6TCP(namespace, packet, srcIP, dstIP, transportOff, w)
 
 	case 17: // UDP
 		if len(packet) < transportOff+8 {
 			return nil
 		}
-		return s.handleIPv6UDP(namespace, clientMAC, gwMAC, packet, srcIP, dstIP, transportOff, w)
+		return s.handleIPv6UDP(namespace, packet, srcIP, dstIP, transportOff, w)
 
 	case 58: // ICMPv6
 		if len(packet) < transportOff+8 {
 			return nil
 		}
-		return s.handleICMPv6(namespace, clientMAC, gwMAC, packet, srcIP, dstIP, w)
+		return s.handleICMPv6(namespace, packet, srcIP, dstIP, w)
 
 	default:
 		// Unsupported protocol
@@ -99,7 +99,7 @@ func skipExtensionHeaders(packet []byte, nextHeader uint8, offset int) (proto ui
 	}
 }
 
-func (s *Stack) handleIPv6TCP(namespace uintptr, clientMAC, gwMAC [6]byte, packet []byte, srcIP, dstIP [16]byte, transportOff int, w Writer) error {
+func (s *Stack) handleIPv6TCP(namespace uintptr, packet []byte, srcIP, dstIP [16]byte, transportOff int, w Writer) error {
 	tcp := packet[transportOff:]
 	if len(tcp) < 20 {
 		return nil
@@ -134,7 +134,7 @@ func (s *Stack) handleIPv6TCP(namespace uintptr, clientMAC, gwMAC [6]byte, packe
 				LocalAddr:  localAddr,
 				RemoteAddr: remoteAddr,
 				Writer: func(tcpSeg []byte) error {
-					return w(buildFrame6(gwMAC, clientMAC, dstIP, srcIP, tcpSeg))
+					return w(buildPacket6(dstIP, srcIP, tcpSeg))
 				},
 				MSS:       1440,
 				Keepalive: true,
@@ -221,7 +221,7 @@ func (s *Stack) handleIPv6TCP(namespace uintptr, clientMAC, gwMAC [6]byte, packe
 			}
 			rstSeg = &vtcp.Segment{SrcPort: dstPort, DstPort: srcPort, Seq: 0, Ack: segSEQ + dataLen, Flags: vtcp.FlagRST | vtcp.FlagACK}
 		}
-		pkt := buildFrame6(gwMAC, clientMAC, dstIP, srcIP, rstSeg.Marshal())
+		pkt := buildPacket6(dstIP, srcIP, rstSeg.Marshal())
 		_ = w(pkt)
 		return nil
 	}
@@ -247,7 +247,7 @@ func (s *Stack) handleIPv6TCP(namespace uintptr, clientMAC, gwMAC [6]byte, packe
 	delete(s.pending6, k)
 	if err != nil {
 		s.mu.Unlock()
-		rst := buildFrame6(gwMAC, clientMAC, dstIP, srcIP,
+		rst := buildPacket6(dstIP, srcIP,
 			(&vtcp.Segment{SrcPort: dstPort, DstPort: srcPort, Ack: seg.Seq + 1, Flags: vtcp.FlagRST | vtcp.FlagACK}).Marshal())
 		_ = w(rst)
 		return nil
@@ -267,7 +267,7 @@ func (s *Stack) handleIPv6TCP(namespace uintptr, clientMAC, gwMAC [6]byte, packe
 		LocalAddr:  localAddr6,
 		RemoteAddr: remoteAddr6,
 		Writer: func(tcpSeg []byte) error {
-			return w(buildFrame6(gwMAC, clientMAC, dstIP, srcIP, tcpSeg))
+			return w(buildPacket6(dstIP, srcIP, tcpSeg))
 		},
 		MSS:       1440,
 		Keepalive: true,
@@ -285,7 +285,7 @@ func (s *Stack) handleIPv6TCP(namespace uintptr, clientMAC, gwMAC [6]byte, packe
 	return nil
 }
 
-func (s *Stack) handleIPv6UDP(namespace uintptr, clientMAC, gwMAC [6]byte, packet []byte, srcIP, dstIP [16]byte, transportOff int, w Writer) error {
+func (s *Stack) handleIPv6UDP(namespace uintptr, packet []byte, srcIP, dstIP [16]byte, transportOff int, w Writer) error {
 	udp := packet[transportOff:]
 	if len(udp) < 8 {
 		return nil
@@ -301,7 +301,7 @@ func (s *Stack) handleIPv6UDP(namespace uintptr, clientMAC, gwMAC [6]byte, packe
 	u := s.udp6[k]
 	if u == nil {
 		var err error
-		u, err = newUDPConn6(srcIP, srcPort, dstIP, dstPort, clientMAC, gwMAC, w)
+		u, err = newUDPConn6(srcIP, srcPort, dstIP, dstPort, w)
 		if err != nil {
 			s.mu.Unlock()
 			return err

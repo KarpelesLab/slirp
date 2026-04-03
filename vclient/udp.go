@@ -36,7 +36,7 @@ type UDPConn struct {
 	recvCond      *sync.Cond
 	closedForRead bool // protected by recvMu
 
-	closed       atomic.Bool // for non-blocking checks in Write
+	closed       atomic.Bool  // for non-blocking checks in Write
 	readDeadline atomic.Value // stores time.Time
 }
 

@@ -151,22 +151,74 @@ func (s *Stack) handleIPv6TCP(namespace uintptr, clientMAC, gwMAC [6]byte, packe
 		return nil
 	}
 
-	// For non-SYN packets to non-existent connections, send RST
+	// Existing outbound NAT connection
 	c := s.tcp6[k]
-	if c == nil && (flags&0x02) == 0 {
+	if c != nil {
+		seg, err := vtcp.ParseSegment(tcp)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		s.mu.Unlock()
+		pkts := c.vc.HandleSegment(seg)
+		for _, pkt := range pkts {
+			_ = c.vc.Writer()(pkt)
+		}
+		return nil
+	}
+
+	// Non-SYN to non-existent → RST
+	if (flags & 0x02) == 0 {
 		s.mu.Unlock()
 		seq := binary.BigEndian.Uint32(tcp[4:8])
-		pkt := BuildTCPPacket6(gwMAC, clientMAC, dstIP, srcIP, dstPort, srcPort, 0, seq+1, 0x14, nil)
+		pkt := buildFrame6(gwMAC, clientMAC, dstIP, srcIP,
+			(&vtcp.Segment{SrcPort: dstPort, DstPort: srcPort, Ack: seq + 1, Flags: vtcp.FlagRST | vtcp.FlagACK}).Marshal())
 		_ = w(pkt)
 		return nil
 	}
 
-	if c == nil {
-		c = newTCPConn6(srcIP, srcPort, dstIP, dstPort, clientMAC, gwMAC, w)
-		s.tcp6[k] = c
+	// SYN → create outbound NAT connection
+	seg, err := vtcp.ParseSegment(tcp)
+	if err != nil {
+		s.mu.Unlock()
+		return err
 	}
 	s.mu.Unlock()
-	return c.handleOutbound(packet)
+
+	remoteAddr := "[" + net.IP(dstIP[:]).String() + "]:" + itoaU16(dstPort)
+	remote, err := net.Dial("tcp", remoteAddr)
+	if err != nil {
+		rst := buildFrame6(gwMAC, clientMAC, dstIP, srcIP,
+			(&vtcp.Segment{SrcPort: dstPort, DstPort: srcPort, Ack: seg.Seq + 1, Flags: vtcp.FlagRST | vtcp.FlagACK}).Marshal())
+		_ = w(rst)
+		return nil
+	}
+
+	localAddr6 := &net.TCPAddr{IP: net.IP(dstIP[:]), Port: int(dstPort)}
+	remoteAddr6 := &net.TCPAddr{IP: net.IP(srcIP[:]), Port: int(srcPort)}
+	vc6 := vtcp.NewConn(vtcp.ConnConfig{
+		LocalPort:  dstPort,
+		RemotePort: srcPort,
+		LocalAddr:  localAddr6,
+		RemoteAddr: remoteAddr6,
+		Writer: func(tcpSeg []byte) error {
+			return w(buildFrame6(gwMAC, clientMAC, dstIP, srcIP, tcpSeg))
+		},
+		MSS:       1440,
+		Keepalive: true,
+	})
+	synAckPkts := vc6.AcceptSYN(seg)
+	nc := &tcpNATConn{vc: vc6, remote: remote}
+
+	s.mu.Lock()
+	s.tcp6[k] = nc
+	s.mu.Unlock()
+
+	for _, pkt := range synAckPkts {
+		_ = vc6.Writer()(pkt)
+	}
+	nc.startBridge()
+	return nil
 }
 
 func (s *Stack) handleIPv6UDP(namespace uintptr, clientMAC, gwMAC [6]byte, packet []byte, srcIP, dstIP [16]byte, w Writer) error {

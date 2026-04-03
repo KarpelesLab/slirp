@@ -24,9 +24,9 @@ type key struct {
 
 type Stack struct {
 	mu         sync.RWMutex
-	tcp        map[key]*tcpConn
+	tcp        map[key]*tcpNATConn
 	udp        map[key]*udpConn
-	tcp6       map[key6]*tcpConn6
+	tcp6       map[key6]*tcpNATConn
 	udp6       map[key6]*udpConn6
 	listeners  map[listenerKey]*Listener
 	listeners6 map[listenerKey6]*Listener6
@@ -38,9 +38,9 @@ type Stack struct {
 
 func New() *Stack {
 	s := &Stack{
-		tcp:        make(map[key]*tcpConn),
+		tcp:        make(map[key]*tcpNATConn),
 		udp:        make(map[key]*udpConn),
-		tcp6:       make(map[key6]*tcpConn6),
+		tcp6:       make(map[key6]*tcpNATConn),
 		udp6:       make(map[key6]*udpConn6),
 		listeners:  make(map[listenerKey]*Listener),
 		listeners6: make(map[listenerKey6]*Listener6),
@@ -62,24 +62,12 @@ func (s *Stack) Close() error {
 
 	// Close all TCP connections
 	for k, c := range s.tcp {
-		c.mu.Lock()
-		c.closed = true
-		if c.conn != nil {
-			_ = c.conn.Close()
-		}
-		c.mu.Unlock()
-		c.cond.Broadcast()
+		c.close()
 		delete(s.tcp, k)
 	}
 	// Close all TCP6 connections
 	for k, c := range s.tcp6 {
-		c.mu.Lock()
-		c.closed = true
-		if c.conn != nil {
-			_ = c.conn.Close()
-		}
-		c.mu.Unlock()
-		c.cond.Broadcast()
+		c.close()
 		delete(s.tcp6, k)
 	}
 	// Close all UDP connections
@@ -248,24 +236,79 @@ func (s *Stack) handleIPv4(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, 
 			return nil
 		}
 
-		// For non-SYN packets to non-existent connections, send RST
+		// Existing outbound NAT connection
 		c := s.tcp[k]
-		if c == nil && (flags&0x02) == 0 {
+		if c != nil {
+			seg, err := vtcp.ParseSegment(tcp)
+			if err != nil {
+				s.mu.Unlock()
+				return err
+			}
 			s.mu.Unlock()
-			// Send RST+ACK so the sender knows the connection doesn't exist
+			pkts := c.vc.HandleSegment(seg)
+			for _, pkt := range pkts {
+				_ = c.vc.Writer()(pkt)
+			}
+			return nil
+		}
+
+		// Non-SYN to non-existent connection → RST
+		if (flags & 0x02) == 0 {
+			s.mu.Unlock()
 			seq := binary.BigEndian.Uint32(tcp[4:8])
-			pkt := BuildTCPPacket(gwMAC, clientMAC, dstIP, srcIP, dstPort, srcPort, 0, seq+1, 0x14, nil)
+			pkt := buildFrame4(gwMAC, clientMAC, dstIP, srcIP,
+				(&vtcp.Segment{SrcPort: dstPort, DstPort: srcPort, Ack: seq + 1, Flags: vtcp.FlagRST | vtcp.FlagACK, Window: 0}).Marshal())
 			_ = w(pkt)
 			return nil
 		}
 
-		// Create outbound connection (only for SYN)
-		if c == nil {
-			c = newTCPConn(srcIP, srcPort, dstIP, dstPort, clientMAC, gwMAC, w)
-			s.tcp[k] = c
+		// SYN → create new outbound NAT connection
+		seg, err := vtcp.ParseSegment(tcp)
+		if err != nil {
+			s.mu.Unlock()
+			return err
 		}
 		s.mu.Unlock()
-		return c.handleOutbound(ip)
+
+		// Dial remote outside any lock
+		remoteAddr := net.IP(dstIP[:]).String() + ":" + itoaU16(dstPort)
+		remote, err := net.Dial("tcp", remoteAddr)
+		if err != nil {
+			// Send RST to client
+			rst := buildFrame4(gwMAC, clientMAC, dstIP, srcIP,
+				(&vtcp.Segment{SrcPort: dstPort, DstPort: srcPort, Ack: seg.Seq + 1, Flags: vtcp.FlagRST | vtcp.FlagACK}).Marshal())
+			_ = w(rst)
+			return nil
+		}
+
+		localAddr := &net.TCPAddr{IP: net.IP(dstIP[:]).To4(), Port: int(dstPort)}
+		remoteClientAddr := &net.TCPAddr{IP: net.IP(srcIP[:]).To4(), Port: int(srcPort)}
+		natVC := vtcp.NewConn(vtcp.ConnConfig{
+			LocalPort:  dstPort,
+			RemotePort: srcPort,
+			LocalAddr:  localAddr,
+			RemoteAddr: remoteClientAddr,
+			Writer: func(tcpSeg []byte) error {
+				return w(buildFrame4(gwMAC, clientMAC, dstIP, srcIP, tcpSeg))
+			},
+			MSS:       1460,
+			Keepalive: true,
+		})
+		synAckPkts := natVC.AcceptSYN(seg)
+		nc := &tcpNATConn{vc: natVC, remote: remote}
+
+		s.mu.Lock()
+		s.tcp[k] = nc
+		s.mu.Unlock()
+
+		// Send SYN-ACK
+		for _, pkt := range synAckPkts {
+			_ = natVC.Writer()(pkt)
+		}
+
+		// Start bidirectional bridge
+		nc.startBridge()
+		return nil
 	case 17: // UDP
 		if len(ip) < ihl+8 {
 			return nil
@@ -306,36 +349,18 @@ func (s *Stack) maintenance() {
 		s.mu.Lock()
 		// TCP cleanup
 		for k, c := range s.tcp {
-			c.mu.Lock()
-			idle := now.Sub(c.lastAct)
-			closed := c.closed
-			if idle > 2*time.Minute || closed {
-				c.closed = true
-				if c.conn != nil {
-					_ = c.conn.Close()
-				}
+			st := c.vc.State()
+			if st == vtcp.StateClosed || st == vtcp.StateTimeWait || c.closed {
+				c.close()
 				delete(s.tcp, k)
-			}
-			c.mu.Unlock()
-			if idle > 2*time.Minute || closed {
-				c.cond.Broadcast()
 			}
 		}
 		// TCP6 cleanup
 		for k, c := range s.tcp6 {
-			c.mu.Lock()
-			idle := now.Sub(c.lastAct)
-			closed := c.closed
-			if idle > 2*time.Minute || closed {
-				c.closed = true
-				if c.conn != nil {
-					_ = c.conn.Close()
-				}
+			st := c.vc.State()
+			if st == vtcp.StateClosed || st == vtcp.StateTimeWait || c.closed {
+				c.close()
 				delete(s.tcp6, k)
-			}
-			c.mu.Unlock()
-			if idle > 2*time.Minute || closed {
-				c.cond.Broadcast()
 			}
 		}
 		// UDP cleanup

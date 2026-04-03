@@ -183,21 +183,14 @@ func TestStackMaintenance(t *testing.T) {
 		dstPort: 80,
 	}
 
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
-	writer := func(b []byte) error { return nil }
-
-	conn := newTCPConn(k.srcIP, k.srcPort, k.dstIP, k.dstPort, clientMAC, gwMAC, writer)
-	// Set connection as old and closed
-	conn.lastAct = time.Now().Add(-5 * time.Minute)
-	conn.closed = true
+	vc := vtcp.NewConn(vtcp.ConnConfig{LocalPort: k.dstPort, RemotePort: k.srcPort, Writer: func([]byte) error { return nil }})
+	vc.Abort()
+	conn := &tcpNATConn{vc: vc, closed: true}
 
 	s.mu.Lock()
 	s.tcp[k] = conn
 	s.mu.Unlock()
 
-	// Wait for maintenance to run (it runs every 30 seconds in real code, but we can't test that easily)
-	// Instead, we'll just verify the structure is correct
 	s.mu.RLock()
 	if len(s.tcp) != 1 {
 		t.Errorf("expected 1 TCP connection, got %d", len(s.tcp))
@@ -238,13 +231,17 @@ func TestStackClose(t *testing.T) {
 	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
 	writer := func(b []byte) error { return nil }
 
+	_ = clientMAC
+	_ = gwMAC
+	_ = writer
+
 	// Add a TCP connection
 	tcpK := key{srcIP: [4]byte{192, 168, 1, 1}, srcPort: 12345, dstIP: [4]byte{8, 8, 8, 8}, dstPort: 80}
-	tcpC := newTCPConn(tcpK.srcIP, tcpK.srcPort, tcpK.dstIP, tcpK.dstPort, clientMAC, gwMAC, writer)
+	tcpC := &tcpNATConn{vc: vtcp.NewConn(vtcp.ConnConfig{LocalPort: 80, RemotePort: 12345, Writer: func([]byte) error { return nil }})}
 
 	// Add a TCP6 connection
 	tcp6K := key6{srcIP: [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, srcPort: 12345, dstIP: [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2}, dstPort: 80}
-	tcp6C := newTCPConn6(tcp6K.srcIP, tcp6K.srcPort, tcp6K.dstIP, tcp6K.dstPort, clientMAC, gwMAC, writer)
+	tcp6C := &tcpNATConn{vc: vtcp.NewConn(vtcp.ConnConfig{LocalPort: 80, RemotePort: 12345, Writer: func([]byte) error { return nil }})}
 
 	// Add a virtual connection (vtcp.Conn)
 	vcK := key{srcIP: [4]byte{192, 168, 1, 50}, srcPort: 45000, dstIP: [4]byte{10, 0, 0, 1}, dstPort: 9000}
@@ -320,18 +317,13 @@ func TestStackClose(t *testing.T) {
 		t.Errorf("expected 0 listeners6 after Close, got %d", len(s.listeners6))
 	}
 
-	// Verify that TCP conn is marked closed
-	tcpC.mu.Lock()
+	// Verify that TCP connections are closed
 	if !tcpC.closed {
 		t.Error("TCP connection should be marked closed after Stack.Close()")
 	}
-	tcpC.mu.Unlock()
-
-	tcp6C.mu.Lock()
 	if !tcp6C.closed {
 		t.Error("TCP6 connection should be marked closed after Stack.Close()")
 	}
-	tcp6C.mu.Unlock()
 
 	if vc.State() != vtcp.StateClosed {
 		t.Errorf("virtual TCP connection should be in CLOSED state after Stack.Close(), got %v", vc.State())
@@ -406,31 +398,33 @@ func TestHandlePacket_IPv6Routing(t *testing.T) {
 }
 
 func TestMaintenanceCleanup_DirectSimulation(t *testing.T) {
-	// Directly simulate what maintenance() does for cleaning up stale connections,
-	// since we can't easily wait for the ticker in tests.
 	s := New()
-	clientMAC := [6]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-	gwMAC := [6]byte{0x06, 0x05, 0x04, 0x03, 0x02, 0x01}
-	writer := func(b []byte) error { return nil }
 
-	// Add a stale closed TCP connection
+	mkNAT := func(closed bool) *tcpNATConn {
+		vc := vtcp.NewConn(vtcp.ConnConfig{LocalPort: 80, RemotePort: 12345, Writer: func([]byte) error { return nil }})
+		if closed {
+			vc.Abort()
+		} else {
+			// Put into SynReceived so it's not in StateClosed
+			vc.AcceptSYN(vtcp.Segment{SrcPort: 12345, DstPort: 80, Seq: 1000, Flags: vtcp.FlagSYN, Window: 65535})
+		}
+		return &tcpNATConn{vc: vc, closed: closed}
+	}
+
+	// Closed TCP connection (should be cleaned up)
 	tcpK := key{srcIP: [4]byte{192, 168, 1, 1}, srcPort: 12345, dstIP: [4]byte{8, 8, 8, 8}, dstPort: 80}
-	tcpC := newTCPConn(tcpK.srcIP, tcpK.srcPort, tcpK.dstIP, tcpK.dstPort, clientMAC, gwMAC, writer)
-	tcpC.closed = true
-	tcpC.lastAct = time.Now().Add(-5 * time.Minute)
+	tcpC := mkNAT(true)
 
-	// Add a fresh TCP connection (should NOT be cleaned up)
+	// Active TCP connection (should NOT be cleaned up)
 	tcpK2 := key{srcIP: [4]byte{192, 168, 1, 2}, srcPort: 12346, dstIP: [4]byte{8, 8, 8, 8}, dstPort: 80}
-	tcpC2 := newTCPConn(tcpK2.srcIP, tcpK2.srcPort, tcpK2.dstIP, tcpK2.dstPort, clientMAC, gwMAC, writer)
-	tcpC2.lastAct = time.Now()
+	tcpC2 := mkNAT(false)
 
-	// Add a stale TCP6 connection
+	// Closed TCP6 connection
 	var src6, dst6 [16]byte
 	src6[15] = 1
 	dst6[15] = 2
 	tcp6K := key6{srcIP: src6, srcPort: 12345, dstIP: dst6, dstPort: 80}
-	tcp6C := newTCPConn6(src6, 12345, dst6, 80, clientMAC, gwMAC, writer)
-	tcp6C.lastAct = time.Now().Add(-5 * time.Minute)
+	tcp6C := mkNAT(true)
 
 	// Add a closed virtual connection (vtcp.Conn in CLOSED state)
 	vcK := key{srcIP: [4]byte{10, 0, 0, 50}, srcPort: 45000, dstIP: [4]byte{10, 0, 0, 1}, dstPort: 9000}
@@ -462,49 +456,28 @@ func TestMaintenanceCleanup_DirectSimulation(t *testing.T) {
 	s.virtTCP6[vc6K] = vc6
 	s.mu.Unlock()
 
-	// Simulate the maintenance cleanup logic inline (same as maintenance() body)
-	now := time.Now()
+	// Simulate the maintenance cleanup logic (same as maintenance() body)
 	s.mu.Lock()
 	for k, c := range s.tcp {
-		c.mu.Lock()
-		idle := now.Sub(c.lastAct)
-		closed := c.closed
-		if idle > 2*time.Minute || closed {
-			c.closed = true
-			if c.conn != nil {
-				_ = c.conn.Close()
-			}
+		st := c.vc.State()
+		if st == vtcp.StateClosed || st == vtcp.StateTimeWait || c.closed {
+			c.close()
 			delete(s.tcp, k)
-		}
-		c.mu.Unlock()
-		if idle > 2*time.Minute || closed {
-			c.cond.Broadcast()
 		}
 	}
 	for k, c := range s.tcp6 {
-		c.mu.Lock()
-		idle := now.Sub(c.lastAct)
-		closed := c.closed
-		if idle > 2*time.Minute || closed {
-			c.closed = true
-			if c.conn != nil {
-				_ = c.conn.Close()
-			}
+		st := c.vc.State()
+		if st == vtcp.StateClosed || st == vtcp.StateTimeWait || c.closed {
+			c.close()
 			delete(s.tcp6, k)
 		}
-		c.mu.Unlock()
-		if idle > 2*time.Minute || closed {
-			c.cond.Broadcast()
-		}
 	}
-	// Virtual TCP cleanup (matches current maintenance logic)
 	for k, vc2 := range s.virtTCP {
 		st := vc2.State()
 		if st == vtcp.StateClosed || st == vtcp.StateTimeWait {
 			delete(s.virtTCP, k)
 		}
 	}
-	// Virtual TCP6 cleanup
 	for k, vc2 := range s.virtTCP6 {
 		st := vc2.State()
 		if st == vtcp.StateClosed || st == vtcp.StateTimeWait {

@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+
+	"github.com/KarpelesLab/slirp/vtcp"
 )
 
 // Dial connects to the address on the named network.
@@ -73,27 +75,38 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 
 func (c *Client) dialTCP(ctx context.Context, localIP, remoteIP [4]byte, remotePort uint16, gwMAC [6]byte) (net.Conn, error) {
 	localPort := c.allocPort()
-	conn := newTCPConn(c, localIP, localPort, remoteIP, remotePort, gwMAC)
+
+	localAddr := &net.TCPAddr{IP: net.IP(localIP[:]).To4(), Port: int(localPort)}
+	remoteAddr := &net.TCPAddr{IP: net.IP(remoteIP[:]).To4(), Port: int(remotePort)}
+
+	vc := vtcp.NewConn(vtcp.ConnConfig{
+		LocalPort:  localPort,
+		RemotePort: remotePort,
+		LocalAddr:  localAddr,
+		RemoteAddr: remoteAddr,
+		Writer: func(tcpSeg []byte) error {
+			return c.sendIPv4(gwMAC, buildIPv4Packet(localIP, remoteIP, tcpSeg))
+		},
+		MSS:       1460,
+		Keepalive: true,
+	})
 
 	k := connKey{localPort: localPort, remoteIP: remoteIP, remotePort: remotePort}
+	conn := &TCPConn{vc: vc, c: c, k: k}
+
 	c.tcpMu.Lock()
 	c.tcpConns[k] = conn
 	c.tcpMu.Unlock()
 
 	// Initiate handshake
-	conn.connect()
-
-	// Wait for connection establishment
-	select {
-	case <-conn.established:
-		return conn, nil
-	case <-ctx.Done():
-		conn.abort()
+	if err := vc.Connect(ctx); err != nil {
 		c.tcpMu.Lock()
 		delete(c.tcpConns, k)
 		c.tcpMu.Unlock()
-		return nil, ctx.Err()
+		return nil, err
 	}
+
+	return conn, nil
 }
 
 func (c *Client) dialUDP(localIP, remoteIP [4]byte, remotePort uint16, gwMAC [6]byte) (net.Conn, error) {

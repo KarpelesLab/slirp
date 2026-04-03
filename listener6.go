@@ -19,7 +19,7 @@ type listenerKey6 struct {
 type Listener6 struct {
 	s         *Stack
 	addr      *net.TCPAddr
-	acceptCh  chan *VirtualConn6
+	acceptCh  chan net.Conn
 	closeCh   chan struct{}
 	closeOnce sync.Once
 }

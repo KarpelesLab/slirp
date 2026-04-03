@@ -525,11 +525,12 @@ func (c *Conn) handleDataState(seg Segment) [][]byte {
 
 	// Process FIN
 	if seg.HasFlag(FlagFIN) {
+		c.recvMu.Lock()
 		finSeq := seg.Seq + seg.DataLen()
 		if finSeq == c.recvBuf.Nxt() {
-			// FIN is in-order — advance nxt by 1 (FIN consumes a sequence number)
 			c.recvBuf.nxt++
 		}
+		c.recvMu.Unlock()
 		needACK = true
 
 		switch c.state {
@@ -604,13 +605,12 @@ func (c *Conn) handleLastAck(seg Segment) [][]byte {
 // --- Data processing ---
 
 func (c *Conn) processData(seg Segment) {
+	c.recvMu.Lock()
 	n := c.recvBuf.Insert(seg.Seq, seg.Payload)
+	c.recvMu.Unlock()
 	if n > 0 {
-		c.recvMu.Lock()
-		c.recvMu.Unlock()
 		c.recvCond.Broadcast()
 	}
-	// Out-of-order: still send ACK (dup ACK helps sender)
 }
 
 func (c *Conn) processACK(ack uint32) {
@@ -1023,8 +1023,9 @@ func (c *Conn) Abort() [][]byte {
 
 // --- net.Conn interface ---
 
-func (c *Conn) LocalAddr() net.Addr  { return c.localAddr }
-func (c *Conn) RemoteAddr() net.Addr { return c.remoteAddr }
+func (c *Conn) LocalAddr() net.Addr    { return c.localAddr }
+func (c *Conn) RemoteAddr() net.Addr   { return c.remoteAddr }
+func (c *Conn) Writer() SegmentWriter { return c.writer }
 
 func (c *Conn) SetDeadline(t time.Time) error {
 	c.readDeadline.Store(t)

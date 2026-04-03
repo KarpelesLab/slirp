@@ -3,6 +3,9 @@ package slirp
 import (
 	"encoding/binary"
 	"errors"
+	"net"
+
+	"github.com/KarpelesLab/slirp/vtcp"
 )
 
 // key6 represents a connection key for IPv6
@@ -84,32 +87,50 @@ func (s *Stack) handleIPv6TCP(namespace uintptr, clientMAC, gwMAC [6]byte, packe
 		listener = s.listeners6[listenerKey6{port: dstPort}]
 	}
 	if listener != nil && (flags&0x02) != 0 { // SYN to virtual listener
-		// Create virtual connection
 		k := key6{ns: namespace, srcIP: srcIP, srcPort: srcPort, dstIP: dstIP, dstPort: dstPort}
 		vc := s.virtTCP6[k]
 		if vc == nil {
-			vc = newVirtualConn6(dstIP, dstPort, srcIP, srcPort, clientMAC, gwMAC, w)
-			vc.clientSeq = binary.BigEndian.Uint32(tcp[4:8]) + 1
-			vc.ack = vc.clientSeq
+			seg, err := vtcp.ParseSegment(tcp)
+			if err != nil {
+				s.mu.Unlock()
+				return err
+			}
+			localAddr := &net.TCPAddr{IP: net.IP(dstIP[:]), Port: int(dstPort)}
+			remoteAddr := &net.TCPAddr{IP: net.IP(srcIP[:]), Port: int(srcPort)}
+			vc = vtcp.NewConn(vtcp.ConnConfig{
+				LocalPort:  dstPort,
+				RemotePort: srcPort,
+				LocalAddr:  localAddr,
+				RemoteAddr: remoteAddr,
+				Writer: func(tcpSeg []byte) error {
+					return w(buildFrame6(gwMAC, clientMAC, dstIP, srcIP, tcpSeg))
+				},
+				MSS:       1440,
+				Keepalive: true,
+			})
+			pkts := vc.AcceptSYN(seg)
 			s.virtTCP6[k] = vc
-
-			// Send SYN-ACK
-			pkt := BuildTCPPacket6(gwMAC, clientMAC, dstIP, srcIP, dstPort, srcPort, vc.seq, vc.ack, 0x12, nil)
 			s.mu.Unlock()
-			_ = w(pkt)
-
-			// Queue connection for Accept()
+			for _, pkt := range pkts {
+				_ = vc.Writer()(pkt)
+			}
 			select {
 			case listener.acceptCh <- vc:
 			default:
-				// Accept queue full, drop connection
 			}
 			return nil
 		}
-		// Retransmitted SYN for existing connection — resend SYN-ACK
-		pkt := BuildTCPPacket6(gwMAC, clientMAC, dstIP, srcIP, dstPort, srcPort, vc.seq, vc.ack, 0x12, nil)
+		// Retransmitted SYN
+		seg, err := vtcp.ParseSegment(tcp)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
 		s.mu.Unlock()
-		_ = w(pkt)
+		pkts := vc.HandleSegment(seg)
+		for _, pkt := range pkts {
+			_ = vc.Writer()(pkt)
+		}
 		return nil
 	}
 
@@ -117,8 +138,17 @@ func (s *Stack) handleIPv6TCP(namespace uintptr, clientMAC, gwMAC [6]byte, packe
 	k := key6{ns: namespace, srcIP: srcIP, srcPort: srcPort, dstIP: dstIP, dstPort: dstPort}
 	vc := s.virtTCP6[k]
 	if vc != nil {
+		seg, err := vtcp.ParseSegment(tcp)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
 		s.mu.Unlock()
-		return vc.handleInbound(packet)
+		pkts := vc.HandleSegment(seg)
+		for _, pkt := range pkts {
+			_ = vc.Writer()(pkt)
+		}
+		return nil
 	}
 
 	// For non-SYN packets to non-existent connections, send RST

@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/KarpelesLab/slirp/vtcp"
 )
 
 func TestNew(t *testing.T) {
@@ -244,18 +246,25 @@ func TestStackClose(t *testing.T) {
 	tcp6K := key6{srcIP: [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, srcPort: 12345, dstIP: [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2}, dstPort: 80}
 	tcp6C := newTCPConn6(tcp6K.srcIP, tcp6K.srcPort, tcp6K.dstIP, tcp6K.dstPort, clientMAC, gwMAC, writer)
 
-	// Add a virtual connection
+	// Add a virtual connection (vtcp.Conn)
 	vcK := key{srcIP: [4]byte{192, 168, 1, 50}, srcPort: 45000, dstIP: [4]byte{10, 0, 0, 1}, dstPort: 9000}
-	vc := newVirtualConn([4]byte{10, 0, 0, 1}, 9000, [4]byte{192, 168, 1, 50}, 45000, clientMAC, gwMAC, writer)
-	vc.established = true
+	vc := vtcp.NewConn(vtcp.ConnConfig{
+		LocalAddr:  &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 9000},
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(192, 168, 1, 50), Port: 45000},
+		LocalPort:  9000,
+		RemotePort: 45000,
+		Writer:     func(seg []byte) error { return nil },
+	})
 
-	// Add a virtual connection6
+	// Add a virtual connection6 (vtcp.Conn)
 	vc6K := key6{srcIP: [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2}, srcPort: 45000, dstIP: [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, dstPort: 9000}
-	var vc6LocalIP, vc6RemoteIP [16]byte
-	vc6LocalIP[15] = 1
-	vc6RemoteIP[15] = 2
-	vc6 := newVirtualConn6(vc6LocalIP, 9000, vc6RemoteIP, 45000, clientMAC, gwMAC, writer)
-	vc6.established = true
+	vc6 := vtcp.NewConn(vtcp.ConnConfig{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("::1"), Port: 9000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("::2"), Port: 45000},
+		LocalPort:  9000,
+		RemotePort: 45000,
+		Writer:     func(seg []byte) error { return nil },
+	})
 
 	// Add a listener
 	listener, err := s.Listen("tcp", "10.0.0.1:7777")
@@ -324,11 +333,11 @@ func TestStackClose(t *testing.T) {
 	}
 	tcp6C.mu.Unlock()
 
-	if !vc.closed.Load() {
-		t.Error("virtual TCP connection should be marked closed after Stack.Close()")
+	if vc.State() != vtcp.StateClosed {
+		t.Errorf("virtual TCP connection should be in CLOSED state after Stack.Close(), got %v", vc.State())
 	}
-	if !vc6.closed.Load() {
-		t.Error("virtual TCP6 connection should be marked closed after Stack.Close()")
+	if vc6.State() != vtcp.StateClosed {
+		t.Errorf("virtual TCP6 connection should be in CLOSED state after Stack.Close(), got %v", vc6.State())
 	}
 }
 
@@ -423,15 +432,27 @@ func TestMaintenanceCleanup_DirectSimulation(t *testing.T) {
 	tcp6C := newTCPConn6(src6, 12345, dst6, 80, clientMAC, gwMAC, writer)
 	tcp6C.lastAct = time.Now().Add(-5 * time.Minute)
 
-	// Add a stale virtual connection
+	// Add a closed virtual connection (vtcp.Conn in CLOSED state)
 	vcK := key{srcIP: [4]byte{10, 0, 0, 50}, srcPort: 45000, dstIP: [4]byte{10, 0, 0, 1}, dstPort: 9000}
-	vc := newVirtualConn([4]byte{10, 0, 0, 1}, 9000, [4]byte{10, 0, 0, 50}, 45000, clientMAC, gwMAC, writer)
-	vc.lastAct = time.Now().Add(-5 * time.Minute)
+	vc := vtcp.NewConn(vtcp.ConnConfig{
+		LocalAddr:  &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 9000},
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 50), Port: 45000},
+		LocalPort:  9000,
+		RemotePort: 45000,
+		Writer:     func(seg []byte) error { return nil },
+	})
+	vc.Abort() // Move to StateClosed
 
-	// Add a stale virtual connection6
+	// Add a closed virtual connection6 (vtcp.Conn in CLOSED state)
 	vc6K := key6{srcIP: src6, srcPort: 45000, dstIP: dst6, dstPort: 9000}
-	vc6 := newVirtualConn6(dst6, 9000, src6, 45000, clientMAC, gwMAC, writer)
-	vc6.lastAct = time.Now().Add(-5 * time.Minute)
+	vc6 := vtcp.NewConn(vtcp.ConnConfig{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("::2"), Port: 9000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("::1"), Port: 45000},
+		LocalPort:  9000,
+		RemotePort: 45000,
+		Writer:     func(seg []byte) error { return nil },
+	})
+	vc6.Abort() // Move to StateClosed
 
 	s.mu.Lock()
 	s.tcp[tcpK] = tcpC
@@ -476,40 +497,18 @@ func TestMaintenanceCleanup_DirectSimulation(t *testing.T) {
 			c.cond.Broadcast()
 		}
 	}
+	// Virtual TCP cleanup (matches current maintenance logic)
 	for k, vc2 := range s.virtTCP {
-		vc2.mu.Lock()
-		idle := now.Sub(vc2.lastAct)
-		closed := vc2.closed.Load()
-		if idle > 2*time.Minute || closed {
-			vc2.closed.Store(true)
+		st := vc2.State()
+		if st == vtcp.StateClosed || st == vtcp.StateTimeWait {
 			delete(s.virtTCP, k)
 		}
-		vc2.mu.Unlock()
-		if idle > 2*time.Minute || closed {
-			vc2.recvMu.Lock()
-			vc2.recvCond.Broadcast()
-			vc2.recvMu.Unlock()
-			vc2.sendMu.Lock()
-			vc2.sendCond.Broadcast()
-			vc2.sendMu.Unlock()
-		}
 	}
+	// Virtual TCP6 cleanup
 	for k, vc2 := range s.virtTCP6 {
-		vc2.mu.Lock()
-		idle := now.Sub(vc2.lastAct)
-		closed := vc2.closed.Load()
-		if idle > 2*time.Minute || closed {
-			vc2.closed.Store(true)
+		st := vc2.State()
+		if st == vtcp.StateClosed || st == vtcp.StateTimeWait {
 			delete(s.virtTCP6, k)
-		}
-		vc2.mu.Unlock()
-		if idle > 2*time.Minute || closed {
-			vc2.recvMu.Lock()
-			vc2.recvCond.Broadcast()
-			vc2.recvMu.Unlock()
-			vc2.sendMu.Lock()
-			vc2.sendCond.Broadcast()
-			vc2.sendMu.Unlock()
 		}
 	}
 	s.mu.Unlock()
@@ -532,11 +531,11 @@ func TestMaintenanceCleanup_DirectSimulation(t *testing.T) {
 	if len(s.virtTCP6) != 0 {
 		t.Errorf("expected 0 virtual TCP6 connections, got %d", len(s.virtTCP6))
 	}
-	if !vc.closed.Load() {
-		t.Error("stale virtual connection should be marked closed")
+	if vc.State() != vtcp.StateClosed {
+		t.Errorf("stale virtual connection should be in CLOSED state, got %v", vc.State())
 	}
-	if !vc6.closed.Load() {
-		t.Error("stale virtual6 connection should be marked closed")
+	if vc6.State() != vtcp.StateClosed {
+		t.Errorf("stale virtual6 connection should be in CLOSED state, got %v", vc6.State())
 	}
 }
 

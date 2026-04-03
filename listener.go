@@ -14,7 +14,7 @@ import (
 type Listener struct {
 	s         *Stack
 	addr      *net.TCPAddr
-	acceptCh  chan *VirtualConn
+	acceptCh  chan net.Conn
 	closeCh   chan struct{}
 	closeOnce sync.Once
 }
@@ -65,7 +65,7 @@ func (s *Stack) listen4(network, address string) (*Listener, error) {
 	l := &Listener{
 		s:        s,
 		addr:     addr,
-		acceptCh: make(chan *VirtualConn, 10),
+		acceptCh: make(chan net.Conn, 10),
 		closeCh:  make(chan struct{}),
 	}
 
@@ -107,7 +107,7 @@ func (s *Stack) listen6(network, address string) (*Listener6, error) {
 	l := &Listener6{
 		s:        s,
 		addr:     addr,
-		acceptCh: make(chan *VirtualConn6, 10),
+		acceptCh: make(chan net.Conn, 10),
 		closeCh:  make(chan struct{}),
 	}
 

@@ -4,8 +4,11 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"net"
 	"sync"
 	"time"
+
+	"github.com/KarpelesLab/slirp/vtcp"
 )
 
 // Writer is the callback used to emit full Ethernet frames back to the client.
@@ -27,8 +30,8 @@ type Stack struct {
 	udp6       map[key6]*udpConn6
 	listeners  map[listenerKey]*Listener
 	listeners6 map[listenerKey6]*Listener6
-	virtTCP    map[key]*VirtualConn
-	virtTCP6   map[key6]*VirtualConn6
+	virtTCP    map[key]*vtcp.Conn
+	virtTCP6   map[key6]*vtcp.Conn
 	done       chan struct{}
 	closeOnce  sync.Once
 }
@@ -41,8 +44,8 @@ func New() *Stack {
 		udp6:       make(map[key6]*udpConn6),
 		listeners:  make(map[listenerKey]*Listener),
 		listeners6: make(map[listenerKey6]*Listener6),
-		virtTCP:    make(map[key]*VirtualConn),
-		virtTCP6:   make(map[key6]*VirtualConn6),
+		virtTCP:    make(map[key]*vtcp.Conn),
+		virtTCP6:   make(map[key6]*vtcp.Conn),
 		done:       make(chan struct{}),
 	}
 	go s.maintenance()
@@ -99,24 +102,12 @@ func (s *Stack) Close() error {
 	}
 	// Close all virtual TCP connections
 	for k, vc := range s.virtTCP {
-		vc.closed.Store(true)
-		vc.recvMu.Lock()
-		vc.recvCond.Broadcast()
-		vc.recvMu.Unlock()
-		vc.sendMu.Lock()
-		vc.sendCond.Broadcast()
-		vc.sendMu.Unlock()
+		vc.Abort()
 		delete(s.virtTCP, k)
 	}
 	// Close all virtual TCP6 connections
 	for k, vc := range s.virtTCP6 {
-		vc.closed.Store(true)
-		vc.recvMu.Lock()
-		vc.recvCond.Broadcast()
-		vc.recvMu.Unlock()
-		vc.sendMu.Lock()
-		vc.sendCond.Broadcast()
-		vc.sendMu.Unlock()
+		vc.Abort()
 		delete(s.virtTCP6, k)
 	}
 	// Close all listeners
@@ -191,32 +182,52 @@ func (s *Stack) handleIPv4(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, 
 			listener = s.listeners[listenerKey{port: dstPort}]
 		}
 		if listener != nil && (flags&0x02) != 0 { // SYN to virtual listener
-			// Create virtual connection
 			k := key{ns: namespace, srcIP: srcIP, srcPort: srcPort, dstIP: dstIP, dstPort: dstPort}
 			vc := s.virtTCP[k]
 			if vc == nil {
-				vc = newVirtualConn(dstIP, dstPort, srcIP, srcPort, clientMAC, gwMAC, w)
-				vc.clientSeq = binary.BigEndian.Uint32(tcp[4:8]) + 1
-				vc.ack = vc.clientSeq
+				// Parse the TCP segment and create a vtcp.Conn
+				seg, err := vtcp.ParseSegment(tcp)
+				if err != nil {
+					s.mu.Unlock()
+					return err
+				}
+				localAddr := &net.TCPAddr{IP: net.IP(dstIP[:]).To4(), Port: int(dstPort)}
+				remoteAddr := &net.TCPAddr{IP: net.IP(srcIP[:]).To4(), Port: int(srcPort)}
+				vc = vtcp.NewConn(vtcp.ConnConfig{
+					LocalPort:  dstPort,
+					RemotePort: srcPort,
+					LocalAddr:  localAddr,
+					RemoteAddr: remoteAddr,
+					Writer: func(tcpSeg []byte) error {
+						return w(buildFrame4(gwMAC, clientMAC, dstIP, srcIP, tcpSeg))
+					},
+					MSS:       1460,
+					Keepalive: true,
+				})
+				pkts := vc.AcceptSYN(seg)
 				s.virtTCP[k] = vc
-
-				// Send SYN-ACK
-				pkt := BuildTCPPacket(gwMAC, clientMAC, dstIP, srcIP, dstPort, srcPort, vc.seq, vc.ack, 0x12, nil)
 				s.mu.Unlock()
-				_ = w(pkt)
+				for _, pkt := range pkts {
+					_ = vc.Writer()(pkt)
+				}
 
-				// Queue connection for Accept()
 				select {
 				case listener.acceptCh <- vc:
 				default:
-					// Accept queue full, drop connection
 				}
 				return nil
 			}
-			// Retransmitted SYN for existing connection — resend SYN-ACK
-			pkt := BuildTCPPacket(gwMAC, clientMAC, dstIP, srcIP, dstPort, srcPort, vc.seq, vc.ack, 0x12, nil)
+			// Retransmitted SYN — HandleSegment will respond with SYN-ACK
+			seg, err := vtcp.ParseSegment(tcp)
+			if err != nil {
+				s.mu.Unlock()
+				return err
+			}
 			s.mu.Unlock()
-			_ = w(pkt)
+			pkts := vc.HandleSegment(seg)
+			for _, pkt := range pkts {
+				_ = vc.Writer()(pkt)
+			}
 			return nil
 		}
 
@@ -224,8 +235,17 @@ func (s *Stack) handleIPv4(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, 
 		k := key{ns: namespace, srcIP: srcIP, srcPort: srcPort, dstIP: dstIP, dstPort: dstPort}
 		vc := s.virtTCP[k]
 		if vc != nil {
+			seg, err := vtcp.ParseSegment(tcp)
+			if err != nil {
+				s.mu.Unlock()
+				return err
+			}
 			s.mu.Unlock()
-			return vc.handleInbound(ip)
+			pkts := vc.HandleSegment(seg)
+			for _, pkt := range pkts {
+				_ = vc.Writer()(pkt)
+			}
+			return nil
 		}
 
 		// For non-SYN packets to non-existent connections, send RST
@@ -344,40 +364,16 @@ func (s *Stack) maintenance() {
 		}
 		// Virtual TCP cleanup
 		for k, vc := range s.virtTCP {
-			vc.mu.Lock()
-			idle := now.Sub(vc.lastAct)
-			closed := vc.closed.Load()
-			if idle > 2*time.Minute || closed {
-				vc.closed.Store(true)
+			st := vc.State()
+			if st == vtcp.StateClosed || st == vtcp.StateTimeWait {
 				delete(s.virtTCP, k)
-			}
-			vc.mu.Unlock()
-			if idle > 2*time.Minute || closed {
-				vc.recvMu.Lock()
-				vc.recvCond.Broadcast()
-				vc.recvMu.Unlock()
-				vc.sendMu.Lock()
-				vc.sendCond.Broadcast()
-				vc.sendMu.Unlock()
 			}
 		}
 		// Virtual TCP6 cleanup
 		for k, vc := range s.virtTCP6 {
-			vc.mu.Lock()
-			idle := now.Sub(vc.lastAct)
-			closed := vc.closed.Load()
-			if idle > 2*time.Minute || closed {
-				vc.closed.Store(true)
+			st := vc.State()
+			if st == vtcp.StateClosed || st == vtcp.StateTimeWait {
 				delete(s.virtTCP6, k)
-			}
-			vc.mu.Unlock()
-			if idle > 2*time.Minute || closed {
-				vc.recvMu.Lock()
-				vc.recvCond.Broadcast()
-				vc.recvMu.Unlock()
-				vc.sendMu.Lock()
-				vc.sendCond.Broadcast()
-				vc.sendMu.Unlock()
 			}
 		}
 		s.mu.Unlock()

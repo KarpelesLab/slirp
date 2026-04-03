@@ -1,5 +1,10 @@
 # slirp
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/KarpelesLab/slirp.svg)](https://pkg.go.dev/github.com/KarpelesLab/slirp)
+[![CI](https://github.com/KarpelesLab/slirp/actions/workflows/ci.yml/badge.svg)](https://github.com/KarpelesLab/slirp/actions/workflows/ci.yml)
+[![Coverage Status](https://coveralls.io/repos/github/KarpelesLab/slirp/badge.svg?branch=master)](https://coveralls.io/github/KarpelesLab/slirp?branch=master)
+[![Go Report Card](https://goreportcard.com/badge/github.com/KarpelesLab/slirp)](https://goreportcard.com/report/github.com/KarpelesLab/slirp)
+
 A user-mode NAT (Network Address Translation) implementation in Go, providing TCP/IP connectivity without requiring root privileges or virtual network interfaces.
 
 ## Overview

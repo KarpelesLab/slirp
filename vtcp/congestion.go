@@ -24,12 +24,11 @@ type CongestionController interface {
 // NewReno implements RFC 5681 TCP congestion control:
 // slow start, congestion avoidance, fast retransmit, fast recovery.
 type NewReno struct {
-	cwnd       uint32 // congestion window (bytes)
-	ssthresh   uint32 // slow start threshold (bytes)
-	mss        uint32 // max segment size (bytes)
-	dupAckCnt  int    // consecutive duplicate ACK count
-	recovery   bool   // in fast recovery
-	recoverSeq uint32 // SND.NXT at time of fast retransmit entry
+	cwnd      uint32 // congestion window (bytes)
+	ssthresh  uint32 // slow start threshold (bytes)
+	mss       uint32 // max segment size (bytes)
+	dupAckCnt int    // consecutive duplicate ACK count
+	recovery  bool   // in fast recovery
 }
 
 // NewNewReno creates a NewReno congestion controller.
@@ -123,12 +122,11 @@ func (nr *NewReno) SSThresh() uint32 {
 // Above that threshold, it uses more aggressive increase/decrease functions
 // that scale better on high-BDP networks.
 type HighSpeed struct {
-	cwnd       uint32
-	ssthresh   uint32
-	mss        uint32
-	dupAckCnt  int
-	recovery   bool
-	recoverSeq uint32
+	cwnd      uint32
+	ssthresh  uint32
+	mss       uint32
+	dupAckCnt int
+	recovery  bool
 }
 
 // RFC 3649 parameters

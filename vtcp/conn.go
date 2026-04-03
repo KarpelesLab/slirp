@@ -55,13 +55,6 @@ func (cfg *ConnConfig) mss() int {
 	return DefaultMSS
 }
 
-func (cfg *ConnConfig) sendBufSize() int {
-	if cfg.SendBufSize > 0 {
-		return cfg.SendBufSize
-	}
-	return DefaultSendBuf
-}
-
 func (cfg *ConnConfig) recvBufSize() int {
 	if cfg.RecvBufSize > 0 {
 		return cfg.RecvBufSize
@@ -243,23 +236,6 @@ func (c *Conn) flushPackets(pkts [][]byte) {
 }
 
 // --- Segment builders ---
-
-func (c *Conn) makeSegment(flags uint8, payload []byte) Segment {
-	seg := Segment{
-		SrcPort: c.localPort,
-		DstPort: c.remotePort,
-		Seq:     c.sendBuf.NXT(),
-		Flags:   flags,
-		Window:  c.rcvWindow(),
-	}
-	if flags&FlagACK != 0 {
-		seg.Ack = c.recvBuf.Nxt()
-	}
-	if len(payload) > 0 {
-		seg.Payload = payload
-	}
-	return seg
-}
 
 func (c *Conn) rcvWindow() uint16 {
 	// Advertise available receive buffer space, scaled by our shift factor.

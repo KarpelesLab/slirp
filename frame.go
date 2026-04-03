@@ -69,23 +69,3 @@ func buildFrame6(srcMAC, dstMAC [6]byte, srcIP, dstIP [16]byte, tcpSeg []byte) [
 	copy(frame[14+40:], tcpCopy)
 	return frame
 }
-
-// extractTCP4 strips the IPv4 header from a packet and returns the raw TCP segment.
-func extractTCP4(ip []byte) []byte {
-	if len(ip) < 20 {
-		return nil
-	}
-	ihl := int(ip[0]&0x0F) * 4
-	if ihl < 20 || len(ip) < ihl {
-		return nil
-	}
-	return ip[ihl:]
-}
-
-// extractTCP6 strips the IPv6 header from a packet and returns the raw TCP segment.
-func extractTCP6(packet []byte) []byte {
-	if len(packet) < 40 {
-		return nil
-	}
-	return packet[40:]
-}

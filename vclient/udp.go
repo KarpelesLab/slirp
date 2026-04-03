@@ -13,8 +13,6 @@ import (
 
 // UDPConn is a virtual UDP connection implementing net.Conn.
 type UDPConn struct {
-	mu sync.Mutex
-
 	localIP    [4]byte
 	localPort  uint16
 	remoteIP   [4]byte

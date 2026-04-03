@@ -624,8 +624,9 @@ func TestHandleSegmentFinWait1_FINWithoutACK(t *testing.T) {
 	state := tc.state
 	tc.mu.Unlock()
 
-	if state != tcpCloseWait {
-		t.Errorf("state = %d, want %d (CloseWait)", state, tcpCloseWait)
+	// Simultaneous close: both sides sent FIN, should be Closing (not CloseWait)
+	if state != tcpClosing {
+		t.Errorf("state = %d, want %d (Closing)", state, tcpClosing)
 	}
 }
 

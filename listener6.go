@@ -192,15 +192,17 @@ func (vc *VirtualConn6) handleInbound(packet []byte) error {
 		return nil
 	}
 
-	if len(payload) > 0 && seq == vc.clientSeq {
-		vc.recvMu.Lock()
-		vc.recvBuf = append(vc.recvBuf, payload...)
-		vc.recvMu.Unlock()
-		signalRecv = true
+	if len(payload) > 0 {
+		if seq == vc.clientSeq {
+			vc.recvMu.Lock()
+			vc.recvBuf = append(vc.recvBuf, payload...)
+			vc.recvMu.Unlock()
+			signalRecv = true
 
-		vc.clientSeq += uint32(len(payload))
-		vc.ack = vc.clientSeq
-
+			vc.clientSeq += uint32(len(payload))
+			vc.ack = vc.clientSeq
+		}
+		// Always ACK (duplicate ACK for out-of-order helps sender retransmit)
 		var localIP, remoteIP [16]byte
 		copy(localIP[:], vc.localAddr.IP)
 		copy(remoteIP[:], vc.remoteAddr.IP)

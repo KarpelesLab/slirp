@@ -348,15 +348,17 @@ func (vc *VirtualConn) handleInbound(ip []byte) error {
 	}
 
 	// Handle data
-	if len(payload) > 0 && seq == vc.clientSeq {
-		vc.recvMu.Lock()
-		vc.recvBuf = append(vc.recvBuf, payload...)
-		vc.recvMu.Unlock()
-		signalRecv = true
+	if len(payload) > 0 {
+		if seq == vc.clientSeq {
+			vc.recvMu.Lock()
+			vc.recvBuf = append(vc.recvBuf, payload...)
+			vc.recvMu.Unlock()
+			signalRecv = true
 
-		vc.clientSeq += uint32(len(payload))
-		vc.ack = vc.clientSeq
-
+			vc.clientSeq += uint32(len(payload))
+			vc.ack = vc.clientSeq
+		}
+		// Always ACK (duplicate ACK for out-of-order helps sender retransmit)
 		pkt := BuildTCPPacket(vc.gwMAC, vc.clientMAC,
 			[4]byte(vc.localAddr.IP.To4()), [4]byte(vc.remoteAddr.IP.To4()),
 			uint16(vc.localAddr.Port), uint16(vc.remoteAddr.Port),

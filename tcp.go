@@ -27,11 +27,13 @@ type tcpConn struct {
 	sUnacked   uint32 // bytes sent to client not yet acked
 	sendQ      []byte // pending data to send
 	finPending bool   // remote closed, send FIN when drained
+	finSent    bool   // we have sent our FIN (sSeq already incremented)
 	mss        int    // simple MSS
 
 	clientMAC [6]byte
 	gwMAC     [6]byte
 	w         Writer
+	outgoing  [][]byte // packets queued for sending outside the lock
 
 	conn           net.Conn
 	established    bool
@@ -57,6 +59,26 @@ func newTCPConn(srcIP [4]byte, srcPort uint16, dstIP [4]byte, dstPort uint16, cl
 	return t
 }
 
+// queuePkt appends a packet to the outgoing queue. Must hold t.mu.
+func (t *tcpConn) queuePkt(pkt []byte) {
+	t.outgoing = append(t.outgoing, pkt)
+}
+
+// drainOutgoing returns and clears the outgoing queue. Must hold t.mu.
+func (t *tcpConn) drainOutgoing() [][]byte {
+	pkts := t.outgoing
+	t.outgoing = nil
+	return pkts
+}
+
+// sendFIN queues a FIN+ACK and marks finSent. Must hold t.mu.
+func (t *tcpConn) sendFIN() {
+	t.queuePkt(BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil))
+	t.sSeq += 1 // FIN consumes a sequence number
+	t.finSent = true
+	t.finPending = false
+}
+
 func (t *tcpConn) handleOutbound(ip []byte) error {
 	ihl := int(ip[0]&0x0F) * 4
 	tcp := ip[ihl:]
@@ -71,7 +93,6 @@ func (t *tcpConn) handleOutbound(ip []byte) error {
 	wnd := binary.BigEndian.Uint16(tcp[14:16])
 
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	t.lastAct = time.Now()
 	t.keepaliveSent = 0
 	t.recvWnd = wnd
@@ -82,16 +103,29 @@ func (t *tcpConn) handleOutbound(ip []byte) error {
 			_ = t.conn.Close()
 		}
 		t.closed = true
+		t.mu.Unlock()
 		return nil
 	}
 
 	if t.conn == nil && (flags&0x02) != 0 { // SYN
-		// initiate remote conn
-		c, err := net.Dial("tcp", net.IP(t.rIP[:]).String()+":"+itoaU16(t.rPort))
+		// Save state needed for dial, then release lock during blocking net.Dial
+		rIP := t.rIP
+		rPort := t.rPort
+		t.mu.Unlock()
+
+		c, err := net.Dial("tcp", net.IP(rIP[:]).String()+":"+itoaU16(rPort))
 		if err != nil {
 			log.Printf("usernat tcp dial failed: %v", err)
+			// Send RST to client so it doesn't wait
+			pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, 0, seq+1, 0x14, nil) // RST+ACK
+			_ = t.w(pkt)
+			t.mu.Lock()
+			t.closed = true
+			t.mu.Unlock()
 			return nil
 		}
+
+		t.mu.Lock()
 		t.conn = c
 		t.cSeq = seq + 1
 		t.sSeq = RandUint32()
@@ -124,10 +158,13 @@ func (t *tcpConn) handleOutbound(ip []byte) error {
 				i += l
 			}
 		}
-		// send SYN-ACK
-		pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.sAck, 0x12, nil)
-		_ = t.w(pkt)
-		// reader goroutine
+		t.queuePkt(BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.sAck, 0x12, nil))
+		pkts := t.drainOutgoing()
+		t.mu.Unlock()
+
+		for _, pkt := range pkts {
+			_ = t.w(pkt)
+		}
 		go t.readFromRemote()
 		go t.maintenanceLoop()
 		return nil
@@ -137,41 +174,38 @@ func (t *tcpConn) handleOutbound(ip []byte) error {
 	if t.conn != nil && !t.established && (flags&0x10) != 0 && ack == t.sSeq+1 {
 		t.established = true
 		t.sSeq += 1 // SYN consumed
-		// nothing to send
+		t.mu.Unlock()
 		return nil
 	}
 
 	if t.conn != nil && len(payload) > 0 {
-		// accept in-sequence data only
 		if seq == t.cSeq {
-			// write to remote
 			_, _ = t.conn.Write(payload)
 			t.cSeq += uint32(len(payload))
-			// send ACK back
-			pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x10, nil)
-			_ = t.w(pkt)
+			t.queuePkt(BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x10, nil))
 			t.cond.Broadcast()
 
-			// Check for piggy-backed FIN (only if data was in-sequence)
+			// Piggy-backed FIN
 			if (flags & 0x01) != 0 {
 				t.cSeq += 1
-				// Half-close: client is done sending, but server may still respond
 				if tc, ok := t.conn.(*net.TCPConn); ok {
 					_ = tc.CloseWrite()
 				}
-				// ACK the FIN; our own FIN is sent later when readFromRemote gets EOF
-				pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x10, nil)
-				_ = t.w(pkt)
+				t.queuePkt(BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x10, nil))
 			}
 		} else {
-			// Out-of-order or retransmit: send duplicate ACK to help sender
-			pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x10, nil)
+			// Out-of-order or retransmit: send duplicate ACK
+			t.queuePkt(BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x10, nil))
+		}
+		pkts := t.drainOutgoing()
+		t.mu.Unlock()
+		for _, pkt := range pkts {
 			_ = t.w(pkt)
 		}
 		return nil
 	}
 
-	// Pure ACKs (possibly with FIN): advance unacked and flush queued data
+	// Pure ACKs (possibly with FIN)
 	if (flags&0x10) != 0 && len(payload) == 0 {
 		if SeqAfter(ack, t.sAck) {
 			adv := ack - t.sAck
@@ -183,28 +217,31 @@ func (t *tcpConn) handleOutbound(ip []byte) error {
 			t.sAck = ack
 			t.flushSendQ()
 			if t.finPending && len(t.sendQ) == 0 && t.sUnacked == 0 {
-				pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
-				_ = t.w(pkt)
-				t.finPending = false
+				t.sendFIN()
 			}
+		}
+		// Check if client ACKed our FIN → fully closed
+		if t.finSent && ack == t.sSeq {
+			t.closed = true
 		}
 	}
 
 	// FIN (may accompany a pure ACK or arrive standalone)
 	if (flags & 0x01) != 0 {
 		t.cSeq += 1
-		// Half-close: client is done sending, but server may still respond
 		if t.conn != nil {
 			if tc, ok := t.conn.(*net.TCPConn); ok {
 				_ = tc.CloseWrite()
 			}
 		}
-		// ACK the FIN; our own FIN is sent later when readFromRemote gets EOF
-		pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x10, nil)
-		_ = t.w(pkt)
-		return nil
+		t.queuePkt(BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x10, nil))
 	}
 
+	pkts := t.drainOutgoing()
+	t.mu.Unlock()
+	for _, pkt := range pkts {
+		_ = t.w(pkt)
+	}
 	return nil
 }
 
@@ -218,9 +255,12 @@ func (t *tcpConn) readFromRemote() {
 			}
 			t.mu.Lock()
 			if len(t.sendQ) == 0 && t.sUnacked == 0 {
-				pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x11, nil)
+				t.sendFIN()
+				pkts := t.drainOutgoing()
 				t.mu.Unlock()
-				_ = t.w(pkt)
+				for _, pkt := range pkts {
+					_ = t.w(pkt)
+				}
 				return
 			}
 			t.finPending = true
@@ -240,11 +280,17 @@ func (t *tcpConn) readFromRemote() {
 			t.sendQ = append(t.sendQ, buf[:n]...)
 			t.flushSendQ()
 			t.lastAct = time.Now()
+			t.keepaliveSent = 0
+			pkts := t.drainOutgoing()
 			t.mu.Unlock()
+			for _, pkt := range pkts {
+				_ = t.w(pkt)
+			}
 		}
 	}
 }
 
+// flushSendQ queues outgoing data segments respecting the client window. Must hold t.mu.
 func (t *tcpConn) flushSendQ() {
 	avail := int(t.recvWnd) - int(t.sUnacked)
 	if avail <= 0 {
@@ -258,8 +304,7 @@ func (t *tcpConn) flushSendQ() {
 		if len(seg) > avail {
 			seg = seg[:avail]
 		}
-		pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x18, seg)
-		_ = t.w(pkt)
+		t.queuePkt(BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x18, seg))
 		t.sSeq += uint32(len(seg))
 		t.sUnacked += uint32(len(seg))
 		t.sendQ = t.sendQ[len(seg):]
@@ -279,29 +324,32 @@ func (t *tcpConn) maintenanceLoop() {
 		}
 		// Window probe
 		if (len(t.sendQ) > 0 || t.sUnacked > 0) && (int(t.recvWnd)-int(t.sUnacked) <= 0) {
-			pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq-1, t.cSeq, 0x10, nil)
-			_ = t.w(pkt)
+			t.queuePkt(BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq-1, t.cSeq, 0x10, nil))
 		}
 		// Keepalive: probe idle established connections
 		if t.established && time.Since(t.lastAct) > 30*time.Second {
 			if t.keepaliveSent >= 3 {
-				// No response after 3 probes — close connection
 				t.closed = true
 				if t.conn != nil {
 					_ = t.conn.Close()
 				}
-				pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x04, nil) // RST
-				_ = t.w(pkt)
+				t.queuePkt(BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq, t.cSeq, 0x04, nil))
+				pkts := t.drainOutgoing()
 				t.mu.Unlock()
+				for _, pkt := range pkts {
+					_ = t.w(pkt)
+				}
 				t.cond.Broadcast()
 				return
 			}
-			// Send keepalive probe (ACK with seq-1)
-			pkt := BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq-1, t.cSeq, 0x10, nil)
-			_ = t.w(pkt)
+			t.queuePkt(BuildTCPPacket(t.gwMAC, t.clientMAC, t.rIP, t.cSrcIP, t.rPort, t.cSrcPort, t.sSeq-1, t.cSeq, 0x10, nil))
 			t.keepaliveSent++
 		}
+		pkts := t.drainOutgoing()
 		t.mu.Unlock()
+		for _, pkt := range pkts {
+			_ = t.w(pkt)
+		}
 	}
 }
 

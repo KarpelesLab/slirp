@@ -20,6 +20,7 @@ const (
 	tcpEstablished
 	tcpFinWait1
 	tcpFinWait2
+	tcpClosing
 	tcpCloseWait
 	tcpLastAck
 	tcpTimeWait
@@ -250,7 +251,7 @@ func (tc *TCPConn) handleSegment(ip []byte, ihl int) {
 				if (flags&0x10) != 0 && ack == tc.sndNxt {
 					tc.state = tcpTimeWait
 				} else {
-					tc.state = tcpCloseWait
+					tc.state = tcpClosing // simultaneous close: both sides sent FIN
 				}
 				signalFinRecvd = true
 				signalRecv = true
@@ -261,6 +262,14 @@ func (tc *TCPConn) handleSegment(ip []byte, ihl int) {
 			}
 		} else if tc.state == tcpFinWait1 && (flags&0x10) != 0 && ack == tc.sndNxt {
 			tc.state = tcpFinWait2
+		}
+
+	case tcpClosing:
+		// Simultaneous close: waiting for ACK of our FIN
+		if (flags&0x10) != 0 && ack == tc.sndNxt {
+			tc.state = tcpTimeWait
+			tc.stopRTO()
+			signalRecv = true
 		}
 
 	case tcpCloseWait:
@@ -651,6 +660,12 @@ func (tc *TCPConn) Read(b []byte) (int, error) {
 	for len(tc.recvBuf) == 0 {
 		if tc.closed.Load() {
 			return 0, io.EOF
+		}
+		// Check if remote sent FIN (all data consumed, no more coming)
+		select {
+		case <-tc.finRecvd:
+			return 0, io.EOF
+		default:
 		}
 		if dl, ok := tc.readDeadline.Load().(time.Time); ok && !dl.IsZero() {
 			if time.Now().After(dl) {

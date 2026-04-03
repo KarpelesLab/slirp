@@ -205,18 +205,17 @@ func TestTCPConnFlushSendQ(t *testing.T) {
 	conn.cSeq = 3000
 	conn.sendQ = []byte("Hello, World! This is test data.")
 
+	conn.mu.Lock()
 	conn.flushSendQ()
+	pkts := conn.drainOutgoing()
+	conn.mu.Unlock()
 
 	if len(conn.sendQ) != 0 {
 		t.Errorf("sendQ should be empty after flush, has %d bytes", len(conn.sendQ))
 	}
 
-	mu.Lock()
-	frameCount := len(sentFrames)
-	mu.Unlock()
-
-	if frameCount < 1 {
-		t.Error("expected at least one frame to be sent")
+	if len(pkts) < 1 {
+		t.Error("expected at least one packet to be queued")
 	}
 }
 

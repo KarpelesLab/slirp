@@ -121,8 +121,16 @@ func (s *Stack) handleIPv6TCP(namespace uintptr, clientMAC, gwMAC [6]byte, packe
 		return vc.handleInbound(packet)
 	}
 
-	// Otherwise, create outbound connection
+	// For non-SYN packets to non-existent connections, send RST
 	c := s.tcp6[k]
+	if c == nil && (flags&0x02) == 0 {
+		s.mu.Unlock()
+		seq := binary.BigEndian.Uint32(tcp[4:8])
+		pkt := BuildTCPPacket6(gwMAC, clientMAC, dstIP, srcIP, dstPort, srcPort, 0, seq+1, 0x14, nil)
+		_ = w(pkt)
+		return nil
+	}
+
 	if c == nil {
 		c = newTCPConn6(srcIP, srcPort, dstIP, dstPort, clientMAC, gwMAC, w)
 		s.tcp6[k] = c

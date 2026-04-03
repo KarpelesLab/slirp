@@ -30,6 +30,7 @@ type Stack struct {
 	virtTCP    map[key]*VirtualConn
 	virtTCP6   map[key6]*VirtualConn6
 	done       chan struct{}
+	closeOnce  sync.Once
 }
 
 func New() *Stack {
@@ -51,7 +52,7 @@ func New() *Stack {
 // Close shuts down the stack, stopping the maintenance goroutine and
 // closing all active connections.
 func (s *Stack) Close() error {
-	close(s.done)
+	s.closeOnce.Do(func() { close(s.done) })
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -227,8 +228,18 @@ func (s *Stack) handleIPv4(namespace uintptr, clientMAC [6]byte, gwMAC [6]byte, 
 			return vc.handleInbound(ip)
 		}
 
-		// Otherwise, create outbound connection
+		// For non-SYN packets to non-existent connections, send RST
 		c := s.tcp[k]
+		if c == nil && (flags&0x02) == 0 {
+			s.mu.Unlock()
+			// Send RST+ACK so the sender knows the connection doesn't exist
+			seq := binary.BigEndian.Uint32(tcp[4:8])
+			pkt := BuildTCPPacket(gwMAC, clientMAC, dstIP, srcIP, dstPort, srcPort, 0, seq+1, 0x14, nil)
+			_ = w(pkt)
+			return nil
+		}
+
+		// Create outbound connection (only for SYN)
 		if c == nil {
 			c = newTCPConn(srcIP, srcPort, dstIP, dstPort, clientMAC, gwMAC, w)
 			s.tcp[k] = c

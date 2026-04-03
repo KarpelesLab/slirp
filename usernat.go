@@ -481,6 +481,20 @@ func SeqAfter(a, b uint32) bool {
 	return int32(a-b) > 0
 }
 
+func itoaU16(v uint16) string {
+	if v == 0 {
+		return "0"
+	}
+	var b [8]byte
+	i := len(b)
+	for v > 0 {
+		i--
+		b[i] = byte('0' + v%10)
+		v /= 10
+	}
+	return string(b[i:])
+}
+
 // RandUint32 returns a cryptographically random uint32.
 func RandUint32() uint32 {
 	var b [4]byte

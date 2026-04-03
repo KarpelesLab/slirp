@@ -1,13 +1,9 @@
 package slirp
 
 import (
-	"encoding/binary"
 	"errors"
-	"io"
 	"net"
 	"sync"
-	"sync/atomic"
-	"time"
 )
 
 // Listener is a virtual network listener for TCP connections within the slirp stack.
@@ -46,13 +42,12 @@ func (s *Stack) listen4(network, address string) (*Listener, error) {
 		s.listeners = make(map[listenerKey]*Listener)
 	}
 
-	// Convert to [4]byte for IPv4
 	if len(addr.IP) != 4 && len(addr.IP) != 16 {
 		return nil, errors.New("invalid IP address")
 	}
 	var ip [4]byte
 	if len(addr.IP) == 16 {
-		copy(ip[:], addr.IP[12:16]) // Extract IPv4 from IPv6-mapped
+		copy(ip[:], addr.IP[12:16])
 	} else {
 		copy(ip[:], addr.IP)
 	}
@@ -86,12 +81,10 @@ func (s *Stack) listen6(network, address string) (*Listener6, error) {
 		s.listeners6 = make(map[listenerKey6]*Listener6)
 	}
 
-	// Convert to [16]byte for IPv6
 	var ip [16]byte
 	if len(addr.IP) == 16 {
 		copy(ip[:], addr.IP)
 	} else if len(addr.IP) == 4 {
-		// IPv4-mapped IPv6 address
 		ip[10] = 0xff
 		ip[11] = 0xff
 		copy(ip[12:], addr.IP)
@@ -116,37 +109,6 @@ func (s *Stack) listen6(network, address string) (*Listener6, error) {
 }
 
 // Accept waits for and returns the next connection to the listener.
-func (l *Listener6) Accept() (net.Conn, error) {
-	select {
-	case conn := <-l.acceptCh:
-		return conn, nil
-	case <-l.closeCh:
-		return nil, errors.New("listener closed")
-	}
-}
-
-// Close closes the listener.
-func (l *Listener6) Close() error {
-	l.closeOnce.Do(func() {
-		close(l.closeCh)
-
-		l.s.mu.Lock()
-		defer l.s.mu.Unlock()
-
-		var ip [16]byte
-		copy(ip[:], l.addr.IP)
-		key := listenerKey6{ip: ip, port: uint16(l.addr.Port)}
-		delete(l.s.listeners6, key)
-	})
-	return nil
-}
-
-// Addr returns the listener's network address.
-func (l *Listener6) Addr() net.Addr {
-	return l.addr
-}
-
-// Accept waits for and returns the next connection to the listener.
 func (l *Listener) Accept() (net.Conn, error) {
 	select {
 	case conn := <-l.acceptCh:
@@ -160,300 +122,49 @@ func (l *Listener) Accept() (net.Conn, error) {
 func (l *Listener) Close() error {
 	l.closeOnce.Do(func() {
 		close(l.closeCh)
-
 		l.s.mu.Lock()
 		defer l.s.mu.Unlock()
-
 		var ip [4]byte
 		if len(l.addr.IP) == 16 {
 			copy(ip[:], l.addr.IP[12:16])
 		} else {
 			copy(ip[:], l.addr.IP)
 		}
-		key := listenerKey{ip: ip, port: uint16(l.addr.Port)}
-		delete(l.s.listeners, key)
+		delete(l.s.listeners, listenerKey{ip: ip, port: uint16(l.addr.Port)})
 	})
 	return nil
 }
 
 // Addr returns the listener's network address.
-func (l *Listener) Addr() net.Addr {
-	return l.addr
-}
+func (l *Listener) Addr() net.Addr { return l.addr }
 
 type listenerKey struct {
 	ip   [4]byte
 	port uint16
 }
 
-// VirtualConn represents a virtual TCP connection within the slirp stack.
-type VirtualConn struct {
-	localAddr  *net.TCPAddr
-	remoteAddr *net.TCPAddr
-
-	// Server->Client communication
-	sendMu   sync.Mutex
-	sendBuf  []byte
-	sendCond *sync.Cond
-
-	// Client->Server communication
-	recvMu   sync.Mutex
-	recvBuf  []byte
-	recvCond *sync.Cond
-
-	// Connection state
-	mu         sync.Mutex
-	closed     atomic.Bool
-	clientMAC  [6]byte
-	gwMAC      [6]byte
-	w          Writer
-	seq        uint32 // Server's sequence number
-	ack        uint32 // Server's acknowledgment number
-	clientSeq  uint32 // Expected client sequence
-	clientWnd  uint16 // Client's receive window
-	lastAct    time.Time
-	established bool
+// Accept waits for and returns the next connection to the listener.
+func (l *Listener6) Accept() (net.Conn, error) {
+	select {
+	case conn := <-l.acceptCh:
+		return conn, nil
+	case <-l.closeCh:
+		return nil, errors.New("listener closed")
+	}
 }
 
-func newVirtualConn(localIP [4]byte, localPort uint16, remoteIP [4]byte, remotePort uint16, clientMAC, gwMAC [6]byte, w Writer) *VirtualConn {
-	vc := &VirtualConn{
-		localAddr:  &net.TCPAddr{IP: net.IP(localIP[:]).To4(), Port: int(localPort)},
-		remoteAddr: &net.TCPAddr{IP: net.IP(remoteIP[:]).To4(), Port: int(remotePort)},
-		clientMAC:  clientMAC,
-		gwMAC:      gwMAC,
-		w:          w,
-		seq:        RandUint32(),
-		clientWnd:  65535,
-		lastAct:    time.Now(),
-	}
-	vc.sendCond = sync.NewCond(&vc.sendMu)
-	vc.recvCond = sync.NewCond(&vc.recvMu)
-	return vc
-}
-
-// Read reads data from the connection (data received from the client).
-func (vc *VirtualConn) Read(b []byte) (int, error) {
-	vc.recvMu.Lock()
-	defer vc.recvMu.Unlock()
-
-	for len(vc.recvBuf) == 0 {
-		if vc.closed.Load() {
-			return 0, io.EOF
-		}
-		vc.recvCond.Wait()
-	}
-
-	n := copy(b, vc.recvBuf)
-	vc.recvBuf = vc.recvBuf[n:]
-	return n, nil
-}
-
-// Write writes data to the connection (data to send to the client).
-func (vc *VirtualConn) Write(b []byte) (int, error) {
-	if vc.closed.Load() {
-		return 0, errors.New("connection closed")
-	}
-
-	vc.sendMu.Lock()
-	vc.sendBuf = append(vc.sendBuf, b...)
-	vc.sendMu.Unlock()
-
-	// Flush synchronously — all locks are released before sending packets,
-	// so this is safe even in synchronous Pipe scenarios.
-	vc.flush()
-
-	return len(b), nil
-}
-
-// flush sends queued data to the client.
-func (vc *VirtualConn) flush() {
-	vc.mu.Lock()
-	if !vc.established {
-		vc.mu.Unlock()
-		return
-	}
-
-	vc.sendMu.Lock()
-	var pkts [][]byte
-	const maxSegment = 1460
-	for len(vc.sendBuf) > 0 {
-		segment := vc.sendBuf
-		if len(segment) > maxSegment {
-			segment = segment[:maxSegment]
-		}
-
-		pkt := BuildTCPPacket(vc.gwMAC, vc.clientMAC,
-			[4]byte(vc.localAddr.IP.To4()), [4]byte(vc.remoteAddr.IP.To4()),
-			uint16(vc.localAddr.Port), uint16(vc.remoteAddr.Port),
-			vc.seq, vc.ack, 0x18, segment)
-
-		pkts = append(pkts, pkt)
-		vc.seq += uint32(len(segment))
-		vc.sendBuf = vc.sendBuf[len(segment):]
-	}
-	vc.sendMu.Unlock()
-	vc.mu.Unlock()
-
-	// Send outside all locks to avoid deadlocks in synchronous Pipe scenarios
-	for _, pkt := range pkts {
-		_ = vc.w(pkt)
-	}
-	vc.sendCond.Broadcast()
-}
-
-// handleInbound processes an incoming packet from the client.
-func (vc *VirtualConn) handleInbound(ip []byte) error {
-	ihl := int(ip[0]&0x0F) * 4
-	tcp := ip[ihl:]
-	doff := int((tcp[12]>>4)&0x0F) * 4
-	if len(tcp) < doff {
-		return nil
-	}
-
-	flags := tcp[13]
-	seq := binary.BigEndian.Uint32(tcp[4:8])
-	ack := binary.BigEndian.Uint32(tcp[8:12])
-	wnd := binary.BigEndian.Uint16(tcp[14:16])
-	payload := tcp[doff:]
-
-	var outgoing [][]byte
-	var signalRecv, signalClose bool
-
-	vc.mu.Lock()
-
-	vc.lastAct = time.Now()
-	vc.clientWnd = wnd
-
-	// RST - tear down connection immediately
-	if (flags & 0x04) != 0 {
-		vc.closed.Store(true)
-		vc.mu.Unlock()
-		vc.recvMu.Lock()
-		vc.recvCond.Broadcast()
-		vc.recvMu.Unlock()
-		vc.sendMu.Lock()
-		vc.sendCond.Broadcast()
-		vc.sendMu.Unlock()
-		return nil
-	}
-
-	// Handle SYN (should already be handled, but complete handshake)
-	if !vc.established && (flags&0x10) != 0 { // ACK
-		if ack == vc.seq+1 {
-			vc.established = true
-			vc.seq += 1 // SYN consumed
-		}
-		vc.mu.Unlock()
-		return nil
-	}
-
-	// Handle data
-	if len(payload) > 0 {
-		if seq == vc.clientSeq {
-			vc.recvMu.Lock()
-			vc.recvBuf = append(vc.recvBuf, payload...)
-			vc.recvMu.Unlock()
-			signalRecv = true
-
-			vc.clientSeq += uint32(len(payload))
-			vc.ack = vc.clientSeq
-		}
-		// Always ACK (duplicate ACK for out-of-order helps sender retransmit)
-		pkt := BuildTCPPacket(vc.gwMAC, vc.clientMAC,
-			[4]byte(vc.localAddr.IP.To4()), [4]byte(vc.remoteAddr.IP.To4()),
-			uint16(vc.localAddr.Port), uint16(vc.remoteAddr.Port),
-			vc.seq, vc.ack, 0x10, nil)
-		outgoing = append(outgoing, pkt)
-	}
-
-	// Handle FIN
-	if (flags & 0x01) != 0 {
-		vc.clientSeq += 1
-		vc.ack = vc.clientSeq
-		vc.closed.Store(true)
-		signalClose = true
-
-		pkt := BuildTCPPacket(vc.gwMAC, vc.clientMAC,
-			[4]byte(vc.localAddr.IP.To4()), [4]byte(vc.remoteAddr.IP.To4()),
-			uint16(vc.localAddr.Port), uint16(vc.remoteAddr.Port),
-			vc.seq, vc.ack, 0x11, nil)
-		outgoing = append(outgoing, pkt)
-	}
-
-	vc.mu.Unlock()
-
-	// Send outside the lock to avoid deadlocks in synchronous Pipe scenarios
-	for _, pkt := range outgoing {
-		_ = vc.w(pkt)
-	}
-
-	if signalRecv || signalClose {
-		vc.recvMu.Lock()
-		vc.recvCond.Broadcast()
-		vc.recvMu.Unlock()
-	}
-	if signalClose {
-		vc.sendMu.Lock()
-		vc.sendCond.Broadcast()
-		vc.sendMu.Unlock()
-	}
-
+// Close closes the listener.
+func (l *Listener6) Close() error {
+	l.closeOnce.Do(func() {
+		close(l.closeCh)
+		l.s.mu.Lock()
+		defer l.s.mu.Unlock()
+		var ip [16]byte
+		copy(ip[:], l.addr.IP)
+		delete(l.s.listeners6, listenerKey6{ip: ip, port: uint16(l.addr.Port)})
+	})
 	return nil
 }
 
-// Close closes the connection.
-func (vc *VirtualConn) Close() error {
-	vc.mu.Lock()
-	if vc.closed.Load() {
-		vc.mu.Unlock()
-		return nil
-	}
-	vc.closed.Store(true)
-	shouldFin := vc.established
-	seq, ack := vc.seq, vc.ack
-	vc.mu.Unlock()
-
-	// Send FIN using captured values
-	if shouldFin {
-		pkt := BuildTCPPacket(vc.gwMAC, vc.clientMAC,
-			[4]byte(vc.localAddr.IP.To4()), [4]byte(vc.remoteAddr.IP.To4()),
-			uint16(vc.localAddr.Port), uint16(vc.remoteAddr.Port),
-			seq, ack, 0x11, nil) // FIN+ACK
-		_ = vc.w(pkt)
-	}
-
-	// Broadcast under the respective locks to prevent missed wakeups
-	vc.recvMu.Lock()
-	vc.recvCond.Broadcast()
-	vc.recvMu.Unlock()
-
-	vc.sendMu.Lock()
-	vc.sendCond.Broadcast()
-	vc.sendMu.Unlock()
-	return nil
-}
-
-// LocalAddr returns the local network address.
-func (vc *VirtualConn) LocalAddr() net.Addr {
-	return vc.localAddr
-}
-
-// RemoteAddr returns the remote network address.
-func (vc *VirtualConn) RemoteAddr() net.Addr {
-	return vc.remoteAddr
-}
-
-// SetDeadline sets the read and write deadlines (not implemented).
-func (vc *VirtualConn) SetDeadline(t time.Time) error {
-	return nil // Not implemented for now
-}
-
-// SetReadDeadline sets the read deadline (not implemented).
-func (vc *VirtualConn) SetReadDeadline(t time.Time) error {
-	return nil // Not implemented for now
-}
-
-// SetWriteDeadline sets the write deadline (not implemented).
-func (vc *VirtualConn) SetWriteDeadline(t time.Time) error {
-	return nil // Not implemented for now
-}
+// Addr returns the listener's network address.
+func (l *Listener6) Addr() net.Addr { return l.addr }

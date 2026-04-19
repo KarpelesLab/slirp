@@ -1,3 +1,4 @@
+// Package slirp is deprecated: use github.com/KarpelesLab/pktkit instead.
 package slirp
 
 import (

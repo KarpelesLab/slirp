@@ -1,5 +1,7 @@
 # slirp
 
+> **⚠️ Deprecated:** This package is no longer maintained. Use [`github.com/KarpelesLab/pktkit`](https://github.com/KarpelesLab/pktkit) instead.
+
 [![Go Reference](https://pkg.go.dev/badge/github.com/KarpelesLab/slirp.svg)](https://pkg.go.dev/github.com/KarpelesLab/slirp)
 [![CI](https://github.com/KarpelesLab/slirp/actions/workflows/ci.yml/badge.svg)](https://github.com/KarpelesLab/slirp/actions/workflows/ci.yml)
 [![Coverage Status](https://coveralls.io/repos/github/KarpelesLab/slirp/badge.svg?branch=master)](https://coveralls.io/github/KarpelesLab/slirp?branch=master)
